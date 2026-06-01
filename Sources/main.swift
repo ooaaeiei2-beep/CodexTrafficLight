@@ -80,7 +80,7 @@ func updateDurationTracking(_ state: String) {
 
 func buildMenu() -> NSMenu {
     let menu = NSMenu()
-    menu.minimumWidth = 220
+    menu.minimumWidth = 120
     let stateStr = (try? String(contentsOfFile: stateFile, encoding: .utf8))?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? "idle"
     let headerText: String
