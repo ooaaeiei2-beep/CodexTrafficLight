@@ -2,6 +2,10 @@ import AppKit
 
 let stateFile = "/tmp/codex_traffic_light_state"
 
+class DraggableImageView: NSImageView {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 func makeTrafficLightImage(active: String, w: CGFloat = 180, h: CGFloat = 66) -> NSImage {
     let img = NSImage(size: NSSize(width: w, height: h))
     img.lockFocus()
@@ -55,7 +59,7 @@ window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
 window.isMovableByWindowBackground = true
 window.makeKeyAndOrderFront(nil)
 
-let imageView = NSImageView(frame: NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 80)).bounds)
+let imageView = DraggableImageView(frame: NSRect(x: 0, y: 0, width: 200, height: 80))
 window.contentView?.addSubview(imageView)
 imageView.image = makeTrafficLightImage(active: "idle")
 
