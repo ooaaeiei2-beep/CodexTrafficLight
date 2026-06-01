@@ -1,36 +1,76 @@
 # Codex Traffic Light 🚦
 
-macOS 状态栏红绿灯，实时显示 Codex 的工作状态。
+macOS 菜单栏红绿灯，通过 Codex hooks 实时显示 Codex 工作状态。
+
+![screenshot](https://img.shields.io/badge/platform-macOS%2015%2B-blue) ![swift](https://img.shields.io/badge/swift-6.0%2B-orange)
 
 ## 效果
 
 | 状态 | 灯光 | 说明 |
 |---|---|---|
-| 思考中 | 🟢 绿灯呼吸 | Codex 正在处理你的请求 |
-| 需要确认 | 🟡 黄灯闪烁 + 通知 | Codex 在等你确认 |
-| 空闲 | 🔴 红灯常亮 | Codex 已结束当前回合 |
+| 思考中 | 🟢 绿灯呼吸 | Codex 正在处理请求 |
+| 需要确认 | 🟡 黄灯急闪 + 8s 通知 | Codex 等待审批 |
+| 空闲 | 🔴 红灯常亮 | Codex 回合结束 |
+
+## 系统要求
+
+| 依赖 | 版本 |
+|---|---|
+| macOS | 15.0+ |
+| Xcode Command Line Tools | 16.0+（提供 `swiftc`） |
+| Codex | 支持 hooks 的版本 |
+
+验证环境：
+
+```bash
+swiftc --version   # Apple Swift version 6.0+
+xcrun --show-sdk-path   # 存在即可
+```
 
 ## 工作原理
 
 ```
-Codex hooks ──> traffic_light_hook.sh ──> /tmp/codex_traffic_light_state
-                                                  │
-Swift 状态栏 app 每秒读取 ─────────────────────────┘
+Codex hooks 事件
+  → traffic_light_hook.sh 写状态到 /tmp/codex_traffic_light_state
+  → Swift 状态栏 app 读取状态文件 + 渲染红绿灯
 ```
 
-纯 hooks 事件驱动，不轮询、不猜测。
+纯 hooks 事件驱动，无轮询开销。
+
+## Hook 事件映射
+
+| Codex 事件 | 写入状态 | 含义 |
+|---|---|---|
+| `UserPromptSubmit` | `working` | 用户发消息 |
+| `PreToolUse` | `working` | 执行工具前 |
+| `PostToolUse` | `working` | 工具执行完 |
+| `PermissionRequest` | `input` | 等待审批 |
+| `Stop` | `idle` | 回合结束 |
+| `SessionStart` | `idle` | 会话启动 |
 
 ## 安装
 
-### 1. 编译
+### 1. 克隆
+
+```bash
+git clone https://github.com/ooaaeiei2-beep/CodexTrafficLight.git
+cd CodexTrafficLight
+```
+
+### 2. 编译
 
 ```bash
 ./build.sh
 ```
 
-### 2. 配置 Codex hooks
+编译产物：`../CodexTrafficLight.app`
+
+### 3. 配置 Codex hooks
+
+替换路径占位符并复制配置文件：
 
 ```bash
+sed -i '' "s|REPO_DIR|$(pwd)|g" hooks.json
 cp hooks.json ~/.codex/hooks.json
 ```
 
@@ -41,25 +81,51 @@ cp hooks.json ~/.codex/hooks.json
 hooks = true
 ```
 
-### 3. 启动
+重启 Codex 使 hooks 生效。
+
+### 4. 初始化状态文件
+
+```bash
+echo "idle" > /tmp/codex_traffic_light_state
+```
+
+### 5. 启动
 
 ```bash
 killall CodexTrafficLight 2>/dev/null; sleep 1
 nohup ~/Documents/学习引导/CodexTrafficLight.app/Contents/MacOS/CodexTrafficLight > /dev/null 2>&1 &
 ```
 
-## 功能
+如需开机自启，在「系统设置 → 通用 → 登录项」中添加该二进制。
 
-- 🟢 绿灯呼吸动画 — 余光能感知 Codex 在跑
-- 🟡 黄灯 8 秒后弹通知 — 提醒你 Codex 需要确认
-- 🔴 红灯显示「上次思考时长」— 知道 Codex 干了多久
-- 📋 点击图标弹出菜单 — 看当前对话、一键打开 Codex
+## 功能清单
 
-## 文件
+- 🟢 绿灯呼吸动画 — Codex 思考时缓慢明暗变化
+- 🟡 黄灯急闪 + 8 秒后弹通知 — 提醒处理审批，点击通知打开 Codex
+- 🔴 红灯常亮 + 显示上次思考时长 — 回合结束后展示耗时
+- 📋 点击图标弹出菜单 — 显示当前线程名称、一键打开 Codex
+- 🛡️ 黄灯安全兜底 — hooks 状态卡住时自动纠正
 
-| 文件 | 说明 |
-|---|---|
-| `Sources/main.swift` | Swift 状态栏 app 源码 |
-| `hooks.json` | Codex hooks 配置 |
-| `traffic_light_hook.sh` | Hook 脚本，写状态文件 |
-| `build.sh` | 编译脚本 |
+## 项目结构
+
+```
+CodexTrafficLight/
+├── Sources/main.swift          # Swift 状态栏 app 源码
+├── hooks.json                  # Codex hooks 配置（含 REPO_DIR 占位符）
+├── traffic_light_hook.sh       # Hook 脚本，写状态文件
+├── build.sh                    # 编译脚本
+├── CodexTrafficLight.icns      # App 图标
+└── README.md
+```
+
+## 手动测试
+
+```bash
+echo "working" > /tmp/codex_traffic_light_state   # 模拟绿灯
+echo "input"   > /tmp/codex_traffic_light_state   # 模拟黄灯（8 秒后弹通知）
+echo "idle"    > /tmp/codex_traffic_light_state   # 模拟红灯
+```
+
+## License
+
+MIT
