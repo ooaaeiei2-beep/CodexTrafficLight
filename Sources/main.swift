@@ -6,6 +6,7 @@ var currentState = "idle"
 var lastWorkingStart: Date? = nil
 var lastWorkingDuration: TimeInterval? = nil
 var yellowStart: Date? = nil
+var yellowNotified = false
 
 // MARK: - 绘制
 
@@ -127,25 +128,13 @@ func updateMenu() {
         ? "上次思考 \(formatDuration(lastWorkingDuration!))" : stateLabel(currentState)
 }
 
-// MARK: - 黄灯通知（每 8 秒重复弹，直到处理）
-
-var lastYellowNotifyTime: Date = Date(timeIntervalSince1970: 0)
+// MARK: - 黄灯通知（8秒弹一次，不重复）
 
 func sendYellowNotification() {
     let c = UNMutableNotificationContent()
-    c.title = "Codex 需要你的确认"
-    c.body = "点击此通知打开 Codex"
-    c.sound = .default
-    c.categoryIdentifier = "YELLOW"
-    // 用不同 identifier 确保每次都是新通知（否则系统会合并）
-    let id = "codex-yellow-\(Int(Date().timeIntervalSince1970))"
-    UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: c, trigger: nil))
-    // 清除旧通知
-    UNUserNotificationCenter.current().getDeliveredNotifications { notifications in
-        let old = notifications.filter { $0.request.identifier.hasPrefix("codex-yellow-") }
-            .map { $0.request.identifier }
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: Array(old.prefix(old.count - 1)))
-    }
+    c.title = "Codex 需要你的确认"; c.body = "点击此通知打开 Codex"; c.sound = .default
+    UNUserNotificationCenter.current().add(UNNotificationRequest(
+        identifier: "codex-yellow", content: c, trigger: nil))
 }
 
 func readStateFile() -> String {
@@ -164,23 +153,13 @@ func tick() {
     currentState = state
     if state == "working" { if lastWorkingStart == nil { lastWorkingStart = Date() } }
     else { if let s = lastWorkingStart { lastWorkingDuration = Date().timeIntervalSince(s); lastWorkingStart = nil } }
-    
-    // 黄灯：每 8 秒重复弹通知，不主动消失
+
     if state == "input" {
-        if yellowStart == nil { yellowStart = Date(); lastYellowNotifyTime = Date(timeIntervalSince1970: 0) }
-        if Date().timeIntervalSince(lastYellowNotifyTime) > 8 {
-            sendYellowNotification()
-            lastYellowNotifyTime = Date()
+        if yellowStart == nil { yellowStart = Date(); yellowNotified = false }
+        else if !yellowNotified, let s = yellowStart, Date().timeIntervalSince(s) > 8 {
+            sendYellowNotification(); yellowNotified = true
         }
-    } else {
-        yellowStart = nil
-        // 退出黄灯时清掉所有黄灯通知
-        UNUserNotificationCenter.current().getDeliveredNotifications { notifications in
-            let ids = notifications.filter { $0.request.identifier.hasPrefix("codex-yellow-") }
-                .map { $0.request.identifier }
-            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
-        }
-    }
+    } else { yellowStart = nil; yellowNotified = false }
 
     if changed { DispatchQueue.main.async { updateMenu() } }
 }
@@ -194,18 +173,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         c.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
     func userNotificationCenter(_ c: UNUserNotificationCenter, didReceive r: UNNotificationResponse,
-                                withCompletionHandler h: @escaping () -> Void) {
-        if r.notification.request.content.categoryIdentifier == "YELLOW" {
-            // 点击黄灯通知 → 打开 Codex + 清掉所有黄灯通知
-            c.removeAllDeliveredNotifications()
-            openCodex()
-        }
-        h()
-    }
+                                withCompletionHandler h: @escaping () -> Void) { openCodex(); h() }
     func userNotificationCenter(_ c: UNUserNotificationCenter, willPresent n: UNNotification,
-                                withCompletionHandler h: @escaping (UNNotificationPresentationOptions) -> Void) {
-        h([.banner, .sound])
-    }
+                                withCompletionHandler h: @escaping (UNNotificationPresentationOptions) -> Void) { h([.banner, .sound]) }
     @objc func openCodexAction() { openCodex() }
 }
 
