@@ -46,11 +46,11 @@ func stateLabel(_ state: String) -> String {
     switch state { case "working": return "思考中"; case "input": return "需要确认"; default: return "空闲" }
 }
 
-func currentThreadTitle() -> String? {
+func sqliteQuery(_ sql: String) -> String? {
     let db = NSHomeDirectory() + "/.codex/state_5.sqlite"
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-    p.arguments = ["-readonly", db, "SELECT title FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1"]
+    p.arguments = ["-readonly", db, sql]
     let pipe = Pipe(); p.standardOutput = pipe
     do { try p.run(); p.waitUntilExit()
         let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
@@ -58,6 +58,18 @@ func currentThreadTitle() -> String? {
         if let out = out, !out.isEmpty { return out }
     } catch {}
     return nil
+}
+
+func currentThreadDisplayName() -> String? {
+    // 优先取 agent_nickname（用户在 Codex 里设置的昵称）
+    if let name = sqliteQuery(
+        "SELECT agent_nickname FROM threads WHERE archived=0 AND agent_nickname IS NOT NULL ORDER BY updated_at_ms DESC LIMIT 1"),
+       !name.isEmpty {
+        return name
+    }
+    // 兜底取 title（第一句话）
+    return sqliteQuery(
+        "SELECT title FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
 }
 
 func openCodex() {
@@ -90,10 +102,10 @@ func buildMenu() -> NSMenu {
     h.isEnabled = false; menu.addItem(h)
     menu.addItem(NSMenuItem(title: "打开 Codex", action: #selector(AppDelegate.openCodexAction), keyEquivalent: ""))
     menu.addItem(.separator())
-    if let title = currentThreadTitle() {
-        let d = title.count > 28 ? String(title.prefix(28)) + "..." : title
+    if let name = currentThreadDisplayName() {
+        let d = name.count > 28 ? String(name.prefix(28)) + "..." : name
         let item = NSMenuItem(title: d, action: nil, keyEquivalent: "")
-        item.isEnabled = false; item.toolTip = title; menu.addItem(item)
+        item.isEnabled = false; item.toolTip = name; menu.addItem(item)
     }
     menu.addItem(.separator())
     menu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
