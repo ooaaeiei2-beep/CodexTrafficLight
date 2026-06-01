@@ -61,15 +61,10 @@ func sqliteQuery(_ sql: String) -> String? {
 }
 
 func currentThreadDisplayName() -> String? {
-    // 优先取 agent_nickname（用户在 Codex 里设置的昵称）
     if let name = sqliteQuery(
         "SELECT agent_nickname FROM threads WHERE archived=0 AND agent_nickname IS NOT NULL ORDER BY updated_at_ms DESC LIMIT 1"),
-       !name.isEmpty {
-        return name
-    }
-    // 兜底取 title（第一句话）
-    return sqliteQuery(
-        "SELECT title FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
+       !name.isEmpty { return name }
+    return sqliteQuery("SELECT title FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
 }
 
 func openCodex() {
@@ -120,6 +115,17 @@ func sendYellowNotification() {
     UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "codex-yellow", content: c, trigger: nil))
 }
 
+// 安全兜底：如果文件状态卡在 input 但 SQLite 显示无需确认，就纠正
+func sanitizeState(_ state: String) -> String {
+    if state != "input" { return state }
+    // 检查 has_user_event 是否确实为 1
+    if sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 LIMIT 1") != nil {
+        return "input"
+    }
+    // 没有待确认 → 纠正为 idle
+    return "idle"
+}
+
 func checkYellowTimer(currentState: String) {
     if currentState == "input" {
         if yellowStart == nil { yellowStart = Date(); yellowNotified = false }
@@ -145,8 +151,9 @@ item.button?.image = makeTrafficLightImage(active: "idle")
 item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
 Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-    let state = (try? String(contentsOfFile: stateFile, encoding: .utf8))?
+    let rawState = (try? String(contentsOfFile: stateFile, encoding: .utf8))?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? "idle"
+    let state = sanitizeState(rawState)
     DispatchQueue.main.async {
         item.button?.image = makeTrafficLightImage(active: state)
         item.menu = buildMenu()
