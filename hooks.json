@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/xushuda/Documents/学习引导/traffic_light_hook.sh idle"
+            "command": "REPO_DIR/traffic_light_hook.sh idle"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/xushuda/Documents/学习引导/traffic_light_hook.sh working"
+            "command": "REPO_DIR/traffic_light_hook.sh working"
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/xushuda/Documents/学习引导/traffic_light_hook.sh working"
+            "command": "REPO_DIR/traffic_light_hook.sh working"
           }
         ]
       }
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/xushuda/Documents/学习引导/traffic_light_hook.sh working"
+            "command": "REPO_DIR/traffic_light_hook.sh working"
           }
         ]
       }
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/xushuda/Documents/学习引导/traffic_light_hook.sh input"
+            "command": "REPO_DIR/traffic_light_hook.sh input"
           }
         ]
       }
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/xushuda/Documents/学习引导/traffic_light_hook.sh idle"
+            "command": "REPO_DIR/traffic_light_hook.sh idle"
           }
         ]
       }
