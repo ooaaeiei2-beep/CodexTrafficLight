@@ -80,24 +80,20 @@ func updateDurationTracking(_ state: String) {
 
 func buildMenu() -> NSMenu {
     let menu = NSMenu()
-    menu.minimumWidth = 120
     let stateStr = (try? String(contentsOfFile: stateFile, encoding: .utf8))?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? "idle"
     let headerText: String
     if stateStr == "idle", let d = lastWorkingDuration {
-        headerText = "Codex · 空闲（上次思考 \(formatDuration(d))）"
-    } else { headerText = "Codex · \(stateLabel(stateStr))" }
+        headerText = "空闲 · 上次思考 \(formatDuration(d))"
+    } else { headerText = stateLabel(stateStr) }
     let h = NSMenuItem(title: headerText, action: nil, keyEquivalent: "")
-    h.isEnabled = false
-    menu.addItem(h)
+    h.isEnabled = false; menu.addItem(h)
     menu.addItem(NSMenuItem(title: "打开 Codex", action: #selector(AppDelegate.openCodexAction), keyEquivalent: ""))
     menu.addItem(.separator())
     if let title = currentThreadTitle() {
-        let maxLen = 30
-        let d = title.count > maxLen ? String(title.prefix(maxLen)) + "..." : title
+        let d = title.count > 28 ? String(title.prefix(28)) + "..." : title
         let item = NSMenuItem(title: d, action: nil, keyEquivalent: "")
-        item.isEnabled = false; item.toolTip = title
-        menu.addItem(item)
+        item.isEnabled = false; item.toolTip = title; menu.addItem(item)
     }
     menu.addItem(.separator())
     menu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
