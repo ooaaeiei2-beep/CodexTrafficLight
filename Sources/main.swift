@@ -7,6 +7,7 @@ var lastWorkingStart: Date? = nil
 var lastWorkingDuration: TimeInterval? = nil
 var yellowStart: Date? = nil
 var yellowNotified = false
+var desktopOverlayRunning = false
 
 // MARK: - 绘制
 
@@ -78,14 +79,11 @@ func threadNameFromIndex() -> String? {
     }
     let indexPath = NSHomeDirectory() + "/.codex/session_index.jsonl"
     guard let content = try? String(contentsOfFile: indexPath, encoding: .utf8) else { return nil }
-    let lines = content.components(separatedBy: "\n")
-    for line in lines {
+    for line in content.components(separatedBy: "\n") {
         if line.contains("\"id\":\"\(threadId)\"") || line.contains("\"id\": \"\(threadId)\"") {
             if let r = line.range(of: "\"thread_name\":\"") {
                 let start = r.upperBound
-                if let end = line[start...].firstIndex(of: "\"") {
-                    return String(line[start..<end])
-                }
+                if let end = line[start...].firstIndex(of: "\"") { return String(line[start..<end]) }
             }
         }
     }
@@ -104,6 +102,37 @@ func openCodex() {
                                         configuration: NSWorkspace.OpenConfiguration())
 }
 
+// MARK: - 桌面悬浮开关
+
+func desktopOverlayPath() -> String {
+    // 从 app bundle 旁边找 DesktopOverlay
+    let appDir = Bundle.main.bundleURL
+        .deletingLastPathComponent()  // MacOS
+        .deletingLastPathComponent()  // Contents
+        .deletingLastPathComponent()  // CodexTrafficLight.app
+    return appDir.appendingPathComponent("CodexTrafficLight/DesktopOverlay/DesktopOverlay").path
+}
+
+func toggleDesktopOverlay() {
+    if desktopOverlayRunning {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        p.arguments = ["DesktopOverlay"]
+        try? p.run()
+        desktopOverlayRunning = false
+    } else {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
+        p.arguments = [desktopOverlayPath(), ">/dev/null", "2>&1", "&"]
+        // nohup 需要 shell
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.arguments = ["-c", "nohup '\(desktopOverlayPath())' >/dev/null 2>&1 &"]
+        try? shell.run()
+        desktopOverlayRunning = true
+    }
+}
+
 func buildMenu() -> NSMenu {
     let menu = NSMenu()
     let t: String
@@ -111,6 +140,10 @@ func buildMenu() -> NSMenu {
     else { t = stateLabel(currentState) }
     let h = NSMenuItem(title: t, action: nil, keyEquivalent: ""); h.isEnabled = false; menu.addItem(h)
     menu.addItem(NSMenuItem(title: "打开 Codex", action: #selector(AppDelegate.openCodexAction), keyEquivalent: ""))
+
+    let overlayTitle = desktopOverlayRunning ? "✓ 桌面悬浮" : "桌面悬浮"
+    menu.addItem(NSMenuItem(title: overlayTitle, action: #selector(AppDelegate.toggleOverlayAction), keyEquivalent: ""))
+
     menu.addItem(.separator())
     if let name = threadDisplayName() {
         let d = name.count > 28 ? String(name.prefix(28)) + "..." : name
@@ -128,13 +161,12 @@ func updateMenu() {
         ? "上次思考 \(formatDuration(lastWorkingDuration!))" : stateLabel(currentState)
 }
 
-// MARK: - 黄灯通知（8秒弹一次，不重复）
+// MARK: - 黄灯通知
 
 func sendYellowNotification() {
     let c = UNMutableNotificationContent()
     c.title = "Codex 需要你的确认"; c.body = "点击此通知打开 Codex"; c.sound = .default
-    UNUserNotificationCenter.current().add(UNNotificationRequest(
-        identifier: "codex-yellow", content: c, trigger: nil))
+    UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "codex-yellow", content: c, trigger: nil))
 }
 
 func readStateFile() -> String {
@@ -153,14 +185,10 @@ func tick() {
     currentState = state
     if state == "working" { if lastWorkingStart == nil { lastWorkingStart = Date() } }
     else { if let s = lastWorkingStart { lastWorkingDuration = Date().timeIntervalSince(s); lastWorkingStart = nil } }
-
     if state == "input" {
         if yellowStart == nil { yellowStart = Date(); yellowNotified = false }
-        else if !yellowNotified, let s = yellowStart, Date().timeIntervalSince(s) > 8 {
-            sendYellowNotification(); yellowNotified = true
-        }
+        else if !yellowNotified, let s = yellowStart, Date().timeIntervalSince(s) > 8 { sendYellowNotification(); yellowNotified = true }
     } else { yellowStart = nil; yellowNotified = false }
-
     if changed { DispatchQueue.main.async { updateMenu() } }
 }
 
@@ -177,6 +205,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func userNotificationCenter(_ c: UNUserNotificationCenter, willPresent n: UNNotification,
                                 withCompletionHandler h: @escaping (UNNotificationPresentationOptions) -> Void) { h([.banner, .sound]) }
     @objc func openCodexAction() { openCodex() }
+    @objc func toggleOverlayAction() { toggleDesktopOverlay(); updateMenu() }
 }
 
 let app = NSApplication.shared
