@@ -72,18 +72,15 @@ func sqliteQuery(_ sql: String) -> String? {
     return nil
 }
 
-// 从 session_index.jsonl 读取用户重命名的线程名
 func threadNameFromIndex() -> String? {
     guard let threadId = sqliteQuery("SELECT id FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1") else {
         return nil
     }
     let indexPath = NSHomeDirectory() + "/.codex/session_index.jsonl"
     guard let content = try? String(contentsOfFile: indexPath, encoding: .utf8) else { return nil }
-    // 简单匹配: "id":"THREAD_ID" ... "thread_name":"NAME"
     let lines = content.components(separatedBy: "\n")
     for line in lines {
         if line.contains("\"id\":\"\(threadId)\"") || line.contains("\"id\": \"\(threadId)\"") {
-            // 提取 thread_name
             if let r = line.range(of: "\"thread_name\":\"") {
                 let start = r.upperBound
                 if let end = line[start...].firstIndex(of: "\"") {
@@ -96,12 +93,9 @@ func threadNameFromIndex() -> String? {
 }
 
 func threadDisplayName() -> String? {
-    // 1. session_index.jsonl 里的重命名
     if let name = threadNameFromIndex(), !name.isEmpty { return name }
-    // 2. SQLite 里的 agent_nickname
     if let name = sqliteQuery("SELECT agent_nickname FROM threads WHERE archived=0 AND agent_nickname IS NOT NULL ORDER BY updated_at_ms DESC LIMIT 1"),
        !name.isEmpty { return name }
-    // 3. 第一句话兜底
     return sqliteQuery("SELECT title FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
 }
 
@@ -137,6 +131,12 @@ func updateMenu() {
 func sendYellowNotification() {
     let c = UNMutableNotificationContent()
     c.title = "Codex 需要你的确认"; c.body = "点击此通知打开 Codex"; c.sound = .default
+    // 附加 app 图标到通知
+    if let iconPath = Bundle.main.path(forResource: "CodexTrafficLight", ofType: "icns"),
+       let attachment = try? UNNotificationAttachment(
+        identifier: "icon", url: URL(fileURLWithPath: iconPath), options: nil) {
+        c.attachments = [attachment]
+    }
     UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "codex-yellow", content: c, trigger: nil))
 }
 
@@ -165,6 +165,10 @@ func tick() {
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
+        // 手动设 app 图标
+        if let iconPath = Bundle.main.path(forResource: "CodexTrafficLight", ofType: "icns") {
+            NSApp.applicationIconImage = NSImage(contentsOfFile: iconPath)
+        }
         let c = UNUserNotificationCenter.current(); c.delegate = self
         c.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
