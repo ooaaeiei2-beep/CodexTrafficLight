@@ -29,15 +29,17 @@ xcrun --show-sdk-path   # 存在即可
 
 ## 工作原理
 
+核心思路借鉴了 [agent-light](https://github.com/eternityspring/agent-light) 的事件驱动模式：不轮询、不猜测，通过 Codex hooks 在特定生命周期事件发生时直接写入状态，Swift 状态栏 app 读取状态文件并渲染红绿灯。
+
 ```
 Codex hooks 事件
   → traffic_light_hook.sh 写状态到 /tmp/codex_traffic_light_state
   → Swift 状态栏 app 读取状态文件 + 渲染红绿灯
 ```
 
-纯 hooks 事件驱动，无轮询开销。
-
 ## Hook 事件映射
+
+Codex hooks 配置完全参考了 [codex-lamp](https://github.com/loopbrew/codex-lamp) 的 hooks.json 格式和事件映射方案：
 
 | Codex 事件 | 写入状态 | 含义 |
 |---|---|---|
@@ -47,6 +49,14 @@ Codex hooks 事件
 | `PermissionRequest` | `input` | 等待审批 |
 | `Stop` | `idle` | 回合结束 |
 | `SessionStart` | `idle` | 会话启动 |
+
+## 功能清单
+
+- 🟢 绿灯呼吸动画 — Codex 思考时缓慢明暗变化
+- 🟡 黄灯急闪 + 8 秒后弹通知 — 提醒处理审批，点击通知打开 Codex
+- 🔴 红灯常亮 + 显示上次思考时长 — 回合结束后展示耗时
+- 📋 点击图标弹出菜单 — 显示当前线程名称、一键打开 Codex
+- 🛡️ 黄灯安全兜底 — hooks 状态卡住时自动通过 SQLite 纠正
 
 ## 安装
 
@@ -98,14 +108,6 @@ nohup ~/Documents/学习引导/CodexTrafficLight.app/Contents/MacOS/CodexTraffic
 
 如需开机自启，在「系统设置 → 通用 → 登录项」中添加该二进制。
 
-## 功能清单
-
-- 🟢 绿灯呼吸动画 — Codex 思考时缓慢明暗变化
-- 🟡 黄灯急闪 + 8 秒后弹通知 — 提醒处理审批，点击通知打开 Codex
-- 🔴 红灯常亮 + 显示上次思考时长 — 回合结束后展示耗时
-- 📋 点击图标弹出菜单 — 显示当前线程名称、一键打开 Codex
-- 🛡️ 黄灯安全兜底 — hooks 状态卡住时自动纠正
-
 ## 项目结构
 
 ```
@@ -125,6 +127,13 @@ echo "working" > /tmp/codex_traffic_light_state   # 模拟绿灯
 echo "input"   > /tmp/codex_traffic_light_state   # 模拟黄灯（8 秒后弹通知）
 echo "idle"    > /tmp/codex_traffic_light_state   # 模拟红灯
 ```
+
+## 致谢
+
+本项目深受以下两个优秀项目的启发，特别是 Codex hooks 的配置格式和事件映射方案：
+
+- **[eternityspring/agent-light](https://github.com/eternityspring/agent-light)** — 事件驱动的 Agent 状态指示灯方案，确立了「不轮询、不猜测，通过 hooks 直接获取状态」的核心思路。
+- **[loopbrew/codex-lamp](https://github.com/loopbrew/codex-lamp)** — Codex 物理灯项目，提供了完整的 hooks.json 配置格式、状态文件通信模式，以及 `PermissionRequest` 等关键 hook 事件的使用示范。
 
 ## License
 
