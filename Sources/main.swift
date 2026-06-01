@@ -32,15 +32,14 @@ func makeTrafficLightImage(active: String) -> NSImage {
         NSColor(white: 0.05, alpha: 1).setFill(); socket.fill()
         if isActive {
             let k: CGFloat = active == "working" ? 0.6+0.4*(sin(now*2.5)+1)/2 : active == "input" ? 0.2+0.8*abs(sin(now*5.0)) : 1.0
-            let alpha = k
             for (off, ba): (CGFloat, CGFloat) in [(4.5,0.08),(3.5,0.06),(3.0,0.04),(2.0,0.03),(1.5,0.02)] {
                 let g = NSBezierPath(ovalIn: NSRect(x: cx-r-off, y: cy-r-off, width: (r+off)*2, height: (r+off)*2))
-                color.withAlphaComponent(ba*alpha).setFill(); g.fill()
+                color.withAlphaComponent(ba*k).setFill(); g.fill()
             }
             let c = NSBezierPath(ovalIn: NSRect(x: cx-r, y: cy-r, width: r*2, height: r*2))
-            color.withAlphaComponent(alpha).setFill(); c.fill()
+            color.withAlphaComponent(k).setFill(); c.fill()
             let hl = NSBezierPath(ovalIn: NSRect(x: cx-2.5, y: cy-2, width: 3, height: 3))
-            NSColor.white.withAlphaComponent(0.35*alpha).setFill(); hl.fill()
+            NSColor.white.withAlphaComponent(0.35*k).setFill(); hl.fill()
         } else {
             let c = NSBezierPath(ovalIn: NSRect(x: cx-r, y: cy-r, width: r*2, height: r*2))
             color.withAlphaComponent(0.15).setFill(); c.fill()
@@ -48,8 +47,6 @@ func makeTrafficLightImage(active: String) -> NSImage {
     }
     img.unlockFocus(); return img
 }
-
-// MARK: - 工具
 
 func stateLabel(_ s: String) -> String {
     switch s { case "working": return "思考中"; case "input": return "需要确认"; default: return "空闲" }
@@ -75,17 +72,15 @@ func sqliteQuery(_ sql: String) -> String? {
     return nil
 }
 
-func openCodex() {
-    NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/Codex.app"),
-                                        configuration: NSWorkspace.OpenConfiguration())
-}
-
-// MARK: - 菜单
-
 func threadDisplayName() -> String? {
     if let name = sqliteQuery("SELECT agent_nickname FROM threads WHERE archived=0 AND agent_nickname IS NOT NULL ORDER BY updated_at_ms DESC LIMIT 1"),
        !name.isEmpty { return name }
     return sqliteQuery("SELECT title FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
+}
+
+func openCodex() {
+    NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/Codex.app"),
+                                        configuration: NSWorkspace.OpenConfiguration())
 }
 
 func buildMenu() -> NSMenu {
@@ -106,15 +101,17 @@ func buildMenu() -> NSMenu {
     return menu
 }
 
-// MARK: - 通知
+func updateMenu() {
+    item.menu = buildMenu()
+    item.button?.toolTip = currentState == "idle" && lastWorkingDuration != nil
+        ? "上次思考 \(formatDuration(lastWorkingDuration!))" : stateLabel(currentState)
+}
 
 func sendYellowNotification() {
     let c = UNMutableNotificationContent()
     c.title = "Codex 需要你的确认"; c.body = "点击此通知打开 Codex"; c.sound = .default
     UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "codex-yellow", content: c, trigger: nil))
 }
-
-// MARK: - 状态更新（每秒）
 
 func readStateFile() -> String {
     (try? String(contentsOfFile: stateFile, encoding: .utf8))?
@@ -125,7 +122,6 @@ func tick() {
     let raw = readStateFile()
     var state = raw
 
-    // 安全兜底
     if state == "input",
        sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 LIMIT 1") == nil {
         state = "idle"
@@ -134,27 +130,16 @@ func tick() {
     let changed = state != currentState
     currentState = state
 
-    // 思考时长
     if state == "working" { if lastWorkingStart == nil { lastWorkingStart = Date() } }
     else { if let s = lastWorkingStart { lastWorkingDuration = Date().timeIntervalSince(s); lastWorkingStart = nil } }
 
-    // 黄灯通知
     if state == "input" {
         if yellowStart == nil { yellowStart = Date(); yellowNotified = false }
         else if !yellowNotified, let s = yellowStart, Date().timeIntervalSince(s) > 8 { sendYellowNotification(); yellowNotified = true }
     } else { yellowStart = nil; yellowNotified = false }
 
-    // 状态变化时更新菜单
-    if changed {
-        DispatchQueue.main.async {
-            item.menu = buildMenu()
-            item.button?.toolTip = state == "idle" && lastWorkingDuration != nil
-                ? "上次思考 \(formatDuration(lastWorkingDuration!))" : stateLabel(state)
-        }
-    }
+    if changed { DispatchQueue.main.async { updateMenu() } }
 }
-
-// MARK: - AppDelegate
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -168,23 +153,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     @objc func openCodexAction() { openCodex() }
 }
 
-// MARK: - 启动
-
 let app = NSApplication.shared
 let delegate = AppDelegate(); app.delegate = delegate
 let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 item.length = 62
 item.button?.image = makeTrafficLightImage(active: "idle")
 item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+updateMenu()  // 启动时立即设菜单
 
-// 动画：0.1s 刷新灯效（只绘图，不 IO）
 Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-    DispatchQueue.main.async {
-        item.button?.image = makeTrafficLightImage(active: currentState)
-    }
+    DispatchQueue.main.async { item.button?.image = makeTrafficLightImage(active: currentState) }
 }
 
-// 状态：1s 读文件 + SQLite + 菜单
 Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in tick() }
 
 app.run()
