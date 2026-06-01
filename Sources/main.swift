@@ -72,9 +72,36 @@ func sqliteQuery(_ sql: String) -> String? {
     return nil
 }
 
+// 从 session_index.jsonl 读取用户重命名的线程名
+func threadNameFromIndex() -> String? {
+    guard let threadId = sqliteQuery("SELECT id FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1") else {
+        return nil
+    }
+    let indexPath = NSHomeDirectory() + "/.codex/session_index.jsonl"
+    guard let content = try? String(contentsOfFile: indexPath, encoding: .utf8) else { return nil }
+    // 简单匹配: "id":"THREAD_ID" ... "thread_name":"NAME"
+    let lines = content.components(separatedBy: "\n")
+    for line in lines {
+        if line.contains("\"id\":\"\(threadId)\"") || line.contains("\"id\": \"\(threadId)\"") {
+            // 提取 thread_name
+            if let r = line.range(of: "\"thread_name\":\"") {
+                let start = r.upperBound
+                if let end = line[start...].firstIndex(of: "\"") {
+                    return String(line[start..<end])
+                }
+            }
+        }
+    }
+    return nil
+}
+
 func threadDisplayName() -> String? {
+    // 1. session_index.jsonl 里的重命名
+    if let name = threadNameFromIndex(), !name.isEmpty { return name }
+    // 2. SQLite 里的 agent_nickname
     if let name = sqliteQuery("SELECT agent_nickname FROM threads WHERE archived=0 AND agent_nickname IS NOT NULL ORDER BY updated_at_ms DESC LIMIT 1"),
        !name.isEmpty { return name }
+    // 3. 第一句话兜底
     return sqliteQuery("SELECT title FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
 }
 
@@ -121,23 +148,18 @@ func readStateFile() -> String {
 func tick() {
     let raw = readStateFile()
     var state = raw
-
     if state == "input",
        sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 LIMIT 1") == nil {
         state = "idle"
     }
-
     let changed = state != currentState
     currentState = state
-
     if state == "working" { if lastWorkingStart == nil { lastWorkingStart = Date() } }
     else { if let s = lastWorkingStart { lastWorkingDuration = Date().timeIntervalSince(s); lastWorkingStart = nil } }
-
     if state == "input" {
         if yellowStart == nil { yellowStart = Date(); yellowNotified = false }
         else if !yellowNotified, let s = yellowStart, Date().timeIntervalSince(s) > 8 { sendYellowNotification(); yellowNotified = true }
     } else { yellowStart = nil; yellowNotified = false }
-
     if changed { DispatchQueue.main.async { updateMenu() } }
 }
 
@@ -159,7 +181,7 @@ let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 item.length = 62
 item.button?.image = makeTrafficLightImage(active: "idle")
 item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-updateMenu()  // 启动时立即设菜单
+updateMenu()
 
 Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
     DispatchQueue.main.async { item.button?.image = makeTrafficLightImage(active: currentState) }
