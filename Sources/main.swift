@@ -104,31 +104,20 @@ func openCodex() {
 
 // MARK: - 桌面悬浮开关
 
-func desktopOverlayPath() -> String {
-    // 从 app bundle 旁边找 DesktopOverlay
-    let appDir = Bundle.main.bundleURL
-        .deletingLastPathComponent()  // MacOS
-        .deletingLastPathComponent()  // Contents
-        .deletingLastPathComponent()  // CodexTrafficLight.app
-    return appDir.appendingPathComponent("CodexTrafficLight/DesktopOverlay/DesktopOverlay").path
-}
+let overlayPath = NSHomeDirectory() + "/Documents/学习引导/CodexTrafficLight/DesktopOverlay/DesktopOverlay"
 
 func toggleDesktopOverlay() {
     if desktopOverlayRunning {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         p.arguments = ["DesktopOverlay"]
-        try? p.run()
+        try? p.run(); p.waitUntilExit()
         desktopOverlayRunning = false
     } else {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
-        p.arguments = [desktopOverlayPath(), ">/dev/null", "2>&1", "&"]
-        // nohup 需要 shell
-        let shell = Process()
-        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
-        shell.arguments = ["-c", "nohup '\(desktopOverlayPath())' >/dev/null 2>&1 &"]
-        try? shell.run()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "nohup '\(overlayPath)' >/dev/null 2>&1 &"]
+        try? p.run()
         desktopOverlayRunning = true
     }
 }
@@ -140,10 +129,8 @@ func buildMenu() -> NSMenu {
     else { t = stateLabel(currentState) }
     let h = NSMenuItem(title: t, action: nil, keyEquivalent: ""); h.isEnabled = false; menu.addItem(h)
     menu.addItem(NSMenuItem(title: "打开 Codex", action: #selector(AppDelegate.openCodexAction), keyEquivalent: ""))
-
     let overlayTitle = desktopOverlayRunning ? "✓ 桌面悬浮" : "桌面悬浮"
     menu.addItem(NSMenuItem(title: overlayTitle, action: #selector(AppDelegate.toggleOverlayAction), keyEquivalent: ""))
-
     menu.addItem(.separator())
     if let name = threadDisplayName() {
         let d = name.count > 28 ? String(name.prefix(28)) + "..." : name
