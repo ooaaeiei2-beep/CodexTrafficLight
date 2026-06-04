@@ -9,7 +9,7 @@ var yellowStart: Date? = nil
 var yellowNotified = false
 var desktopOverlayRunning = false
 
-// MARK: - 绘制
+// MARK: - 绘制（四灯版：绿/黄/蓝/红）
 
 func makeTrafficLightImage(active: String) -> NSImage {
     let w: CGFloat = 60, h: CGFloat = 22
@@ -20,26 +20,33 @@ func makeTrafficLightImage(active: String) -> NSImage {
     let inner = NSBezierPath(roundedRect: NSRect(x: 3, y: 4, width: w - 6, height: h - 8), xRadius: 3, yRadius: 3)
     NSColor(white: 0.1, alpha: 1).setFill(); inner.fill()
     let now: CGFloat = CGFloat(Date().timeIntervalSince1970)
+    // 绿 黄 蓝 红
     let colors: [(String, NSColor)] = [
-        ("working", NSColor(red: 0.1, green: 0.75, blue: 0.25, alpha: 1)),
-        ("input",   NSColor(red: 1.0, green: 0.75, blue: 0.1, alpha: 1)),
-        ("idle",    NSColor(red: 0.9, green: 0.15, blue: 0.1, alpha: 1)),
+        ("working",    NSColor(red: 0.1, green: 0.75, blue: 0.25, alpha: 1)),
+        ("input",      NSColor(red: 1.0, green: 0.75, blue: 0.1, alpha: 1)),
+        ("auto_review",NSColor(red: 0.1, green: 0.4,  blue: 1.0, alpha: 1)),
+        ("idle",       NSColor(red: 0.9, green: 0.15, blue: 0.1, alpha: 1)),
     ]
-    let r: CGFloat = 6, centers: [CGFloat] = [12, 30, 48]
+    let r: CGFloat = 5.5, spacing: CGFloat = (w - 10) / 4
+    let centers: [CGFloat] = [6 + spacing*0.5, 6 + spacing*1.5, 6 + spacing*2.5, 6 + spacing*3.5]
     for (i, centerX) in centers.enumerated() {
         let (state, bright) = colors[i], isActive = state == active, color = bright
         let cx = centerX, cy: CGFloat = h / 2
-        let socket = NSBezierPath(ovalIn: NSRect(x: cx - r - 1.5, y: cy - r - 1.5, width: (r+1.5)*2, height: (r+1.5)*2))
+        let socket = NSBezierPath(ovalIn: NSRect(x: cx - r - 1.2, y: cy - r - 1.2, width: (r+1.2)*2, height: (r+1.2)*2))
         NSColor(white: 0.05, alpha: 1).setFill(); socket.fill()
         if isActive {
-            let k: CGFloat = active == "working" ? 0.6+0.4*(sin(now*2.5)+1)/2 : active == "input" ? 0.2+0.8*abs(sin(now*5.0)) : 1.0
-            for (off, ba): (CGFloat, CGFloat) in [(4.5,0.08),(3.5,0.06),(3.0,0.04),(2.0,0.03),(1.5,0.02)] {
+            let k: CGFloat
+            if active == "working"    { k = 0.6 + 0.4 * (sin(now * 2.5) + 1) / 2 }
+            else if active == "input" { k = 0.2 + 0.8 * abs(sin(now * 5.0)) }
+            else if active == "auto_review" { k = 0.3 + 0.7 * abs(sin(now * 4.0)) }
+            else { k = 1.0 }
+            for (off, ba): (CGFloat, CGFloat) in [(3.5,0.08),(2.5,0.06),(2.0,0.04),(1.5,0.03),(1.0,0.02)] {
                 let g = NSBezierPath(ovalIn: NSRect(x: cx-r-off, y: cy-r-off, width: (r+off)*2, height: (r+off)*2))
                 color.withAlphaComponent(ba*k).setFill(); g.fill()
             }
             let c = NSBezierPath(ovalIn: NSRect(x: cx-r, y: cy-r, width: r*2, height: r*2))
             color.withAlphaComponent(k).setFill(); c.fill()
-            let hl = NSBezierPath(ovalIn: NSRect(x: cx-2.5, y: cy-2, width: 3, height: 3))
+            let hl = NSBezierPath(ovalIn: NSRect(x: cx-2, y: cy-1.5, width: 2.5, height: 2))
             NSColor.white.withAlphaComponent(0.35*k).setFill(); hl.fill()
         } else {
             let c = NSBezierPath(ovalIn: NSRect(x: cx-r, y: cy-r, width: r*2, height: r*2))
@@ -50,7 +57,8 @@ func makeTrafficLightImage(active: String) -> NSImage {
 }
 
 func stateLabel(_ s: String) -> String {
-    switch s { case "working": return "思考中"; case "input": return "需要确认"; default: return "空闲" }
+    switch s { case "working": return "思考中"; case "input": return "需要确认"
+        case "auto_review": return "自动审批"; default: return "空闲" }
 }
 
 func formatDuration(_ sec: TimeInterval) -> String {
@@ -102,7 +110,29 @@ func openCodex() {
                                         configuration: NSWorkspace.OpenConfiguration())
 }
 
-// MARK: - 桌面悬浮开关
+// MARK: - 自动审批检测
+
+func rolloutPath() -> String? {
+    sqliteQuery("SELECT rollout_path FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
+}
+
+func isAutoReview() -> Bool {
+    guard let path = rolloutPath(),
+          let content = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
+    // 找最后一条 function_call
+    let lines = content.components(separatedBy: "\n")
+    for i in stride(from: lines.count - 1, through: 0, by: -1) {
+        let line = lines[i]
+        if line.contains("\"type\":\"function_call\"") {
+            return line.contains("require_escalated")
+        }
+        // 遇到 task_complete 说明上一轮已结束，不再往前找
+        if line.contains("\"type\":\"task_complete\"") { break }
+    }
+    return false
+}
+
+// MARK: - 桌面悬浮
 
 let overlayPath = NSHomeDirectory() + "/Documents/学习引导/CodexTrafficLight/DesktopOverlay/DesktopOverlay"
 
@@ -129,8 +159,8 @@ func buildMenu() -> NSMenu {
     else { t = stateLabel(currentState) }
     let h = NSMenuItem(title: t, action: nil, keyEquivalent: ""); h.isEnabled = false; menu.addItem(h)
     menu.addItem(NSMenuItem(title: "打开 Codex", action: #selector(AppDelegate.openCodexAction), keyEquivalent: ""))
-    let overlayTitle = desktopOverlayRunning ? "✓ 桌面悬浮" : "桌面悬浮"
-    menu.addItem(NSMenuItem(title: overlayTitle, action: #selector(AppDelegate.toggleOverlayAction), keyEquivalent: ""))
+    let ot = desktopOverlayRunning ? "✓ 桌面悬浮" : "桌面悬浮"
+    menu.addItem(NSMenuItem(title: ot, action: #selector(AppDelegate.toggleOverlayAction), keyEquivalent: ""))
     menu.addItem(.separator())
     if let name = threadDisplayName() {
         let d = name.count > 28 ? String(name.prefix(28)) + "..." : name
@@ -164,13 +194,17 @@ func readStateFile() -> String {
 func tick() {
     let raw = readStateFile()
     var state = raw
+    // 黄灯安全兜底
     if state == "input",
        sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 LIMIT 1") == nil {
         state = "idle"
     }
+    // 蓝灯检测：hooks 写的是 working，但最后一条 function_call 有 require_escalated → 自动审批
+    if state == "working" && isAutoReview() { state = "auto_review" }
+
     let changed = state != currentState
     currentState = state
-    if state == "working" { if lastWorkingStart == nil { lastWorkingStart = Date() } }
+    if state == "working" || state == "auto_review" { if lastWorkingStart == nil { lastWorkingStart = Date() } }
     else { if let s = lastWorkingStart { lastWorkingDuration = Date().timeIntervalSince(s); lastWorkingStart = nil } }
     if state == "input" {
         if yellowStart == nil { yellowStart = Date(); yellowNotified = false }
