@@ -115,14 +115,15 @@ func rolloutPath() -> String? {
 }
 
 // 读取最后一条 function_call 的 arguments JSON
-func lastFunctionCallArgs() -> String? {
+// 读取当前回合最后一条含 require_escalated 的 function_call 的 arguments
+func escalatedCallArgs() -> String? {
     guard let path = rolloutPath(),
           let content = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
     for line in content.components(separatedBy: "\n").reversed() {
-        if line.contains("\"type\":\"function_call\"") {
+        if line.contains("\"type\":\"task_complete\"") { break }
+        if line.contains("\"type\":\"function_call\"") && line.contains("require_escalated") {
             if let r1 = line.range(of: "\"arguments\":\"") {
                 let start = r1.upperBound
-                // 找对应的结束引号（需要处理转义）
                 var depth = 0, prev: Character = "\0"
                 for (j, ch) in line[start...].enumerated() {
                     if ch == "\"" && prev != "\\" { break }
@@ -139,18 +140,17 @@ func lastFunctionCallArgs() -> String? {
             }
             break
         }
-        if line.contains("\"type\":\"task_complete\"") { break }
     }
     return nil
 }
 
 func hasPrefixRuleInLastCall() -> Bool {
-    guard let args = lastFunctionCallArgs() else { return false }
+    guard let args = escalatedCallArgs() else { return false }
     return args.contains("\"prefix_rule\"")
 }
 
 func hasRequireEscalatedInLastCall() -> Bool {
-    guard let args = lastFunctionCallArgs() else { return false }
+    guard let args = escalatedCallArgs() else { return false }
     return args.contains("require_escalated")
 }
 
