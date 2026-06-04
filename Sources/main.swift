@@ -17,6 +17,8 @@ func log(_ msg: String) {
     } else { try? line.write(toFile: debugLog, atomically: true, encoding: .utf8) }
 }
 
+// MARK: - 绘制
+
 func makeTrafficLightImage(active: Set<String>) -> NSImage {
     let w: CGFloat = 78, h: CGFloat = 22
     let img = NSImage(size: NSSize(width: w, height: h))
@@ -62,11 +64,12 @@ func makeTrafficLightImage(active: Set<String>) -> NSImage {
 }
 
 func stateLabel(_ active: Set<String>) -> String {
-    if active.contains("input") && active.contains("auto_review") { return "需要确认 + 自动审批" }
-    if active.contains("input")      { return "需要确认" }
-    if active.contains("auto_review"){ return "自动审批" }
-    if active.contains("working")    { return "思考中" }
-    return "空闲"
+    var parts: [String] = []
+    if active.contains("working")     { parts.append("思考中") }
+    if active.contains("input")       { parts.append("需要确认") }
+    if active.contains("auto_review") { parts.append("自动审批") }
+    if parts.isEmpty                  { parts.append("空闲") }
+    return parts.joined(separator: " + ")
 }
 
 func formatDuration(_ sec: TimeInterval) -> String {
@@ -85,7 +88,7 @@ func sqliteQuery(_ sql: String) -> String? {
         let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let out = out, !out.isEmpty { return out }
-    } catch { log("SQLITE FAIL: \(error)") }
+    } catch {}
     return nil
 }
 
@@ -111,22 +114,44 @@ func openCodex() {
                                         configuration: NSWorkspace.OpenConfiguration())
 }
 
-func rolloutPath() -> String? { sqliteQuery("SELECT rollout_path FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1") }
+// MARK: - 遍历所有活跃线程
 
-func checkEscalation() -> (hasEscalation: Bool, isAuto: Bool) {
-    guard let path = rolloutPath() else { log("CHECK: no rollout path"); return (false, false) }
-    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { log("CHECK: cant read \(path)"); return (false, false) }
-    var hasEsc = false, hasAuto = false
-    for line in content.components(separatedBy: "\n").reversed() {
-        if line.contains("\"type\":\"task_complete\"") { break }
-        if line.contains("\"type\":\"function_call\"") && line.contains("require_escalated") {
-            hasEsc = true
-            if line.contains("prefix_rule") { hasAuto = true }
+// 返回所有活跃线程的 rollout 路径
+func allActiveRolloutPaths() -> [String] {
+    guard let result = sqliteQuery(
+        "SELECT rollout_path FROM threads WHERE archived=0"
+    ) else { return [] }
+    return result.components(separatedBy: "\n").filter { !$0.isEmpty }
+}
+
+// 任一活跃线程有 has_user_event？
+func anyHasUserEvent() -> Bool {
+    // 只关心最近 30 秒内有活动的线程，避免旧确认残留
+    sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 AND updated_at_ms > (unixepoch('subsec')*1000 - 30000) LIMIT 1") != nil
+}
+
+// 任一活跃线程的 rollout 有自动审批？
+func anyHasAutoReview() -> Bool {
+    for path in allActiveRolloutPaths() {
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+        for line in content.components(separatedBy: "\n").reversed() {
+            if line.contains("\"type\":\"task_complete\"") { break }
+            if line.contains("\"type\":\"function_call\"") && line.contains("require_escalated") {
+                if line.contains("prefix_rule") { return true }
+            }
         }
     }
-    log("CHECK: esc=\(hasEsc) auto=\(hasAuto)")
-    return (hasEsc, hasAuto)
+    return false
 }
+
+// 任一活跃线程在最近 3 秒内被更新？
+func anyRecentlyUpdated() -> Bool {
+    sqliteQuery(
+        "SELECT id FROM threads WHERE archived=0 AND updated_at_ms > (unixepoch('subsec')*1000 - 3000) LIMIT 1"
+    ) != nil
+}
+
+// MARK: - 桌面悬浮
 
 let overlayPath = NSHomeDirectory() + "/Documents/学习引导/CodexTrafficLight/DesktopOverlay/DesktopOverlay"
 
@@ -152,7 +177,7 @@ func buildMenu() -> NSMenu {
     menu.addItem(NSMenuItem(title: desktopOverlayRunning ? "✓ 桌面悬浮" : "桌面悬浮", action: #selector(AppDelegate.toggleOverlayAction), keyEquivalent: ""))
     menu.addItem(.separator())
     if let name = threadDisplayName() {
-        menu.addItem(NSMenuItem(title: name.count > 28 ? String(name.prefix(28))+"..." : name, action: nil, keyEquivalent: ""))
+    menu.addItem(NSMenuItem(title: name.count > 28 ? String(name.prefix(28))+"..." : name, action: nil, keyEquivalent: ""))
     }
     menu.addItem(.separator())
     menu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -179,12 +204,16 @@ func readStateFile() -> String {
 func tick() {
     var lights = Set<String>()
     let raw = readStateFile()
-    let (hasEsc, isAuto) = checkEscalation()
+    let isWorking = raw == "working" || raw == "input" || anyRecentlyUpdated()
+    let isInput = anyHasUserEvent()
+    let isAuto = anyHasAutoReview()
 
-    if raw == "working" || raw == "input" { lights.insert("working") }
-    if hasEsc && isAuto { lights.insert("auto_review") }
-    if hasEsc && !isAuto { lights.insert("input") }
+    if isWorking { lights.insert("working") }
+    if isInput   { lights.insert("input") }
+    if isAuto    { lights.insert("auto_review") }
     if lights.isEmpty { lights = ["idle"] }
+
+    log("RAW=\(raw) work=\(isWorking) input=\(isInput) auto=\(isAuto) -> \(lights.sorted().joined(separator: "+"))")
 
     let changed = lights != activeLights
     activeLights = lights
