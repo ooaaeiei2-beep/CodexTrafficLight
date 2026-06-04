@@ -33,9 +33,10 @@ func makeTrafficLightImage(active: Set<String>) -> NSImage {
         ("input",      NSColor(red: 1.0, green: 0.75, blue: 0.1, alpha: 1)),
         ("auto_review",NSColor(red: 0.1, green: 0.4,  blue: 1.0, alpha: 1)),
         ("idle",       NSColor(red: 0.9, green: 0.15, blue: 0.1, alpha: 1)),
+        ("partial",    NSColor(red: 0.9, green: 0.15, blue: 0.1, alpha: 1)),
     ]
-    let r: CGFloat = 5.5, spacing: CGFloat = (w - 12) / 4
-    let centers: [CGFloat] = [8 + spacing*0.5, 8 + spacing*1.5, 8 + spacing*2.5, 8 + spacing*3.5]
+    let r: CGFloat = 5.5, spacing: CGFloat = (w - 12) / 5
+    let centers: [CGFloat] = [8 + spacing*0.5, 8 + spacing*1.5, 8 + spacing*2.5, 8 + spacing*3.5, 8 + spacing*4.5]
     for (i, centerX) in centers.enumerated() {
         let (state, bright) = configs[i], isActive = active.contains(state), color = bright
         let cx = centerX, cy: CGFloat = h / 2
@@ -46,6 +47,7 @@ func makeTrafficLightImage(active: Set<String>) -> NSImage {
             if state == "working"     { k = 0.6 + 0.4 * (sin(now * 2.5) + 1) / 2 }
             else if state == "input"  { k = 0.2 + 0.8 * abs(sin(now * 5.0)) }
             else if state == "auto_review" { k = 0.3 + 0.7 * abs(sin(now * 4.0)) }
+            else if state == "partial"     { k = 0.2 + 0.8 * abs(sin(now * 6.0)) }
             else { k = 1.0 }
             for (off, ba): (CGFloat, CGFloat) in [(3.5,0.08),(2.5,0.06),(2.0,0.04),(1.5,0.03),(1.0,0.02)] {
                 let g = NSBezierPath(ovalIn: NSRect(x: cx-r-off, y: cy-r-off, width: (r+off)*2, height: (r+off)*2))
@@ -64,6 +66,8 @@ func makeTrafficLightImage(active: Set<String>) -> NSImage {
 }
 
 func stateLabel(_ active: Set<String>) -> String {
+    if active.contains("partial") { return "部分空闲" }
+    if active.contains("idle"), let d = lastWorkingDuration { return "空闲 · 上次思考 \(formatDuration(d))" }
     var parts: [String] = []
     if active.contains("working")     { parts.append("思考中") }
     if active.contains("input")       { parts.append("需要确认") }
@@ -114,23 +118,17 @@ func openCodex() {
                                         configuration: NSWorkspace.OpenConfiguration())
 }
 
-// MARK: - 遍历所有活跃线程
+// MARK: - 多线程检测
 
-// 返回所有活跃线程的 rollout 路径
 func allActiveRolloutPaths() -> [String] {
-    guard let result = sqliteQuery(
-        "SELECT rollout_path FROM threads WHERE archived=0"
-    ) else { return [] }
+    guard let result = sqliteQuery("SELECT rollout_path FROM threads WHERE archived=0") else { return [] }
     return result.components(separatedBy: "\n").filter { !$0.isEmpty }
 }
 
-// 任一活跃线程有 has_user_event？
 func anyHasUserEvent() -> Bool {
-    // 只关心最近 30 秒内有活动的线程，避免旧确认残留
     sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 AND updated_at_ms > (unixepoch('subsec')*1000 - 30000) LIMIT 1") != nil
 }
 
-// 任一活跃线程的 rollout 有自动审批？
 func anyHasAutoReview() -> Bool {
     for path in allActiveRolloutPaths() {
         guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
@@ -144,11 +142,12 @@ func anyHasAutoReview() -> Bool {
     return false
 }
 
-// 任一活跃线程在最近 3 秒内被更新？
-func anyRecentlyUpdated() -> Bool {
-    sqliteQuery(
-        "SELECT id FROM threads WHERE archived=0 AND updated_at_ms > (unixepoch('subsec')*1000 - 3000) LIMIT 1"
-    ) != nil
+func anyWorking() -> Bool {
+    sqliteQuery("SELECT id FROM threads WHERE archived=0 AND updated_at_ms > (unixepoch('subsec')*1000 - 3000) LIMIT 1") != nil
+}
+
+func anyIdle() -> Bool {
+    sqliteQuery("SELECT id FROM threads WHERE archived=0 AND updated_at_ms <= (unixepoch('subsec')*1000 - 3000) LIMIT 1") != nil
 }
 
 // MARK: - 桌面悬浮
@@ -169,10 +168,7 @@ func toggleDesktopOverlay() {
 
 func buildMenu() -> NSMenu {
     let menu = NSMenu()
-    let t: String
-    if activeLights == ["idle"], let d = lastWorkingDuration { t = "空闲 · 上次思考 \(formatDuration(d))" }
-    else { t = stateLabel(activeLights) }
-    menu.addItem(NSMenuItem(title: t, action: nil, keyEquivalent: ""))
+    menu.addItem(NSMenuItem(title: stateLabel(activeLights), action: nil, keyEquivalent: ""))
     menu.addItem(NSMenuItem(title: "打开 Codex", action: #selector(AppDelegate.openCodexAction), keyEquivalent: ""))
     menu.addItem(NSMenuItem(title: desktopOverlayRunning ? "✓ 桌面悬浮" : "桌面悬浮", action: #selector(AppDelegate.toggleOverlayAction), keyEquivalent: ""))
     menu.addItem(.separator())
@@ -186,7 +182,7 @@ func buildMenu() -> NSMenu {
 
 func updateMenu() {
     item.menu = buildMenu()
-    item.button?.toolTip = activeLights == ["idle"] && lastWorkingDuration != nil
+    item.button?.toolTip = activeLights.contains("idle") && lastWorkingDuration != nil
         ? "上次思考 \(formatDuration(lastWorkingDuration!))" : stateLabel(activeLights)
 }
 
@@ -204,16 +200,20 @@ func readStateFile() -> String {
 func tick() {
     var lights = Set<String>()
     let raw = readStateFile()
-    let isWorking = raw == "working" || raw == "input" || anyRecentlyUpdated()
+    let isWorking = raw == "working" || raw == "input" || anyWorking()
     let isInput = anyHasUserEvent()
     let isAuto = anyHasAutoReview()
+    let isIdle = anyIdle()
 
     if isWorking { lights.insert("working") }
     if isInput   { lights.insert("input") }
     if isAuto    { lights.insert("auto_review") }
-    if lights.isEmpty { lights = ["idle"] }
+    // 部分完成：有活跃 + 有空闲 → 红灯快闪
+    if isWorking && isIdle { lights.insert("partial") }
+    else if lights.isEmpty && isIdle { lights.insert("idle") }
+    else if lights.isEmpty { lights.insert("idle") }
 
-    log("RAW=\(raw) work=\(isWorking) input=\(isInput) auto=\(isAuto) -> \(lights.sorted().joined(separator: "+"))")
+    log("RAW=\(raw) work=\(isWorking) in=\(isInput) auto=\(isAuto) idle=\(isIdle) -> \(lights.sorted().joined(separator: "+"))")
 
     let changed = lights != activeLights
     activeLights = lights
@@ -244,7 +244,7 @@ log("=== START ===")
 let app = NSApplication.shared
 let delegate = AppDelegate(); app.delegate = delegate
 let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-item.length = 80
+item.length = 92
 item.button?.image = makeTrafficLightImage(active: ["idle"])
 item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 updateMenu()
