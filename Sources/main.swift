@@ -9,11 +9,7 @@ var yellowStart: Date? = nil
 var yellowNotified = false
 var desktopOverlayRunning = false
 
-// 启动时间戳：启动前就存在的静默线程不算空闲
 let appStartTimeMs = Int64(Date().timeIntervalSince1970 * 1000)
-
-// 黄灯防抖：需要连续 2 次读到的 per-thread 都是 input 才亮
-var lastTickHadInput = false
 
 func log(_ msg: String) {
     let line = ISO8601DateFormatter().string(from: Date()) + " " + msg + "\n"
@@ -40,15 +36,9 @@ func makeTrafficLightImage(active: Set<String>) -> NSImage {
     let r: CGFloat = 6, spacing: CGFloat = (w - 12) / 4
     let centers: [CGFloat] = [8 + spacing*0.5, 8 + spacing*1.5, 8 + spacing*2.5, 8 + spacing*3.5]
     let isPartial = active.contains("partial")
-
     for (i, centerX) in centers.enumerated() {
         let (state, bright) = configs[i], color = bright
-        let isActive: Bool
-        if state == "idle" {
-            isActive = active.contains("idle") || isPartial
-        } else {
-            isActive = active.contains(state)
-        }
+        let isActive: Bool = state == "idle" ? (active.contains("idle") || isPartial) : active.contains(state)
         let cx = centerX, cy: CGFloat = h / 2
         let socket = NSBezierPath(ovalIn: NSRect(x: cx - r - 1.5, y: cy - r - 1.5, width: (r+1.5)*2, height: (r+1.5)*2))
         NSColor(white: 0.05, alpha: 1).setFill(); socket.fill()
@@ -123,7 +113,7 @@ func threadDisplayName() -> String? {
 
 func openCodex() { NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/Codex.app"), configuration: NSWorkspace.OpenConfiguration()) }
 
-// MARK: - 方案C：Per-thread 文件 + SQLite 兜底
+// MARK: - 方案C
 
 func readPerThreadStates() -> [String: String] {
     var states: [String: String] = [:]
@@ -150,40 +140,53 @@ func allActiveThreads() -> [(id: String, updated: Int64, path: String)] {
     return threads
 }
 
-func threadHasAutoReview(_ path: String) -> Bool {
-    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
+// 只看当前回合最后一条 escalated call：有 prefix_rule → 自动审批
+func lastEscalatedIsAuto(_ path: String) -> Bool? {
+    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    var found = false
     for line in content.components(separatedBy: "\n").reversed() {
         if line.contains("\"type\":\"task_complete\"") { break }
-        if line.contains("\"type\":\"function_call\"") && line.contains("require_escalated") { if line.contains("prefix_rule") { return true } }
+        if line.contains("\"type\":\"function_call\"") && line.contains("require_escalated") {
+            if found { continue }
+            found = true
+            return line.contains("prefix_rule")
+        }
     }
-    return false
+    return nil  // 没有 escalated call
 }
 
 func aggregateState() -> (working: Bool, input: Bool, auto: Bool, hasIdle: Bool) {
     let perThread = readPerThreadStates(), allThreads = allActiveThreads()
     let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-    var hasWorking = false, rawInput = false, hasAuto = false, hasIdle = false
+    var hasWorking = false, hasInput = false, hasAuto = false, hasIdle = false
 
     for t in allThreads {
-        // 只关心启动后有活动的线程
         if t.updated < appStartTimeMs { continue }
-
         let recent = (nowMs - t.updated) < 30000
         let hookState = perThread[t.id]
 
         if (hookState == "working" || hookState == "input") && recent { hasWorking = true }
-        if hookState == "input" && recent { rawInput = true }
-        if threadHasAutoReview(t.path) && recent { hasAuto = true }
+
+        // 黄灯：per-thread 为 input 时，查 rollout 确认是否真的人工审批
+        if hookState == "input" && recent {
+            if let isAuto = lastEscalatedIsAuto(t.path) {
+                // 最后一条 escalated call 有 prefix_rule → 自动 → 不亮黄
+                // 没有 prefix_rule → 人工 → 亮黄
+                if !isAuto { hasInput = true }
+            }
+        }
+
+        // 蓝灯：per-thread 为 working 时，查最后一条 escalated call 是否自动
+        if hookState == "working" && recent {
+            if let isAuto = lastEscalatedIsAuto(t.path), isAuto {
+                hasAuto = true
+            }
+        }
+
         if !recent && hookState != "working" && hookState != "input" { hasIdle = true }
     }
 
-    // 黄灯防抖：连续两次都是 input 才亮
-    let hasInput = rawInput && lastTickHadInput
-    lastTickHadInput = rawInput
-
-    // 没有 per-thread 文件时回退 SQLite
     if perThread.isEmpty { hasWorking = allThreads.contains(where: { nowMs - $0.updated < 3000 }) }
-
     return (hasWorking, hasInput, hasAuto, hasIdle)
 }
 
