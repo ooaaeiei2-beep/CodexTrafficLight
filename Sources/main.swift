@@ -1,7 +1,6 @@
 import AppKit
 import UserNotifications
 
-let stateFile = "/tmp/codex_traffic_light_state"
 let debugLog = "/tmp/traffic_light_debug.log"
 var activeLights: Set<String> = ["idle"]
 var lastWorkingStart: Date? = nil
@@ -17,7 +16,7 @@ func log(_ msg: String) {
     } else { try? line.write(toFile: debugLog, atomically: true, encoding: .utf8) }
 }
 
-// MARK: - 绘制
+// MARK: - 绘制（五灯）
 
 func makeTrafficLightImage(active: Set<String>) -> NSImage {
     let w: CGFloat = 78, h: CGFloat = 22
@@ -32,8 +31,8 @@ func makeTrafficLightImage(active: Set<String>) -> NSImage {
         ("working",    NSColor(red: 0.1, green: 0.75, blue: 0.25, alpha: 1)),
         ("input",      NSColor(red: 1.0, green: 0.75, blue: 0.1, alpha: 1)),
         ("auto_review",NSColor(red: 0.1, green: 0.4,  blue: 1.0, alpha: 1)),
-        ("idle",       NSColor(red: 0.9, green: 0.15, blue: 0.1, alpha: 1)),
         ("partial",    NSColor(red: 0.9, green: 0.15, blue: 0.1, alpha: 1)),
+        ("idle",       NSColor(red: 0.9, green: 0.15, blue: 0.1, alpha: 1)),
     ]
     let r: CGFloat = 5.5, spacing: CGFloat = (w - 12) / 5
     let centers: [CGFloat] = [8 + spacing*0.5, 8 + spacing*1.5, 8 + spacing*2.5, 8 + spacing*3.5, 8 + spacing*4.5]
@@ -118,36 +117,95 @@ func openCodex() {
                                         configuration: NSWorkspace.OpenConfiguration())
 }
 
-// MARK: - 多线程检测
+// MARK: - 方案C：Per-thread 状态文件 + SQLite 兜底
 
-func allActiveRolloutPaths() -> [String] {
-    guard let result = sqliteQuery("SELECT rollout_path FROM threads WHERE archived=0") else { return [] }
-    return result.components(separatedBy: "\n").filter { !$0.isEmpty }
+// 读取所有 per-thread 状态文件，返回 [threadId: state]
+func readPerThreadStates() -> [String: String] {
+    var states: [String: String] = [:]
+    let fm = FileManager.default
+    guard let files = try? fm.contentsOfDirectory(atPath: "/tmp") else { return states }
+    for file in files {
+        guard file.hasPrefix("codex_tl_") else { continue }
+        let tid = String(file.dropFirst("codex_tl_".count))
+        let path = "/tmp/\(file)"
+        if let content = try? String(contentsOfFile: path, encoding: .utf8) {
+            states[tid] = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+    return states
 }
 
-func anyHasUserEvent() -> Bool {
-    sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 AND updated_at_ms > (unixepoch('subsec')*1000 - 30000) LIMIT 1") != nil
+// 获取所有活跃线程的 ID、updated_at、rollout_path、has_user_event
+func allActiveThreads() -> [(id: String, updated: Int64, path: String, hasEvent: Bool)] {
+    guard let result = sqliteQuery(
+        "SELECT id, updated_at_ms, rollout_path, has_user_event FROM threads WHERE archived=0"
+    ) else { return [] }
+    var threads: [(String, Int64, String, Bool)] = []
+    for line in result.components(separatedBy: "\n") {
+        let parts = line.components(separatedBy: "|")
+        if parts.count >= 4,
+           let updated = Int64(parts[1]),
+           !parts[2].isEmpty {
+            threads.append((parts[0], updated, parts[2], parts[3] == "1"))
+        }
+    }
+    return threads
 }
 
-func anyHasAutoReview() -> Bool {
-    for path in allActiveRolloutPaths() {
-        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
-        for line in content.components(separatedBy: "\n").reversed() {
-            if line.contains("\"type\":\"task_complete\"") { break }
-            if line.contains("\"type\":\"function_call\"") && line.contains("require_escalated") {
-                if line.contains("prefix_rule") { return true }
-            }
+// 检查线程的 rollout 是否有自动审批（prefix_rule）
+func threadHasAutoReview(_ path: String) -> Bool {
+    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
+    for line in content.components(separatedBy: "\n").reversed() {
+        if line.contains("\"type\":\"task_complete\"") { break }
+        if line.contains("\"type\":\"function_call\"") && line.contains("require_escalated") {
+            if line.contains("prefix_rule") { return true }
         }
     }
     return false
 }
 
-func anyWorking() -> Bool {
-    sqliteQuery("SELECT id FROM threads WHERE archived=0 AND updated_at_ms > (unixepoch('subsec')*1000 - 3000) LIMIT 1") != nil
-}
+// 聚合所有线程状态
+func aggregateState() -> (working: Bool, input: Bool, auto: Bool, hasIdle: Bool) {
+    let perThread = readPerThreadStates()
+    let allThreads = allActiveThreads()
+    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
 
-func anyIdle() -> Bool {
-    sqliteQuery("SELECT id FROM threads WHERE archived=0 AND updated_at_ms <= (unixepoch('subsec')*1000 - 3000) LIMIT 1") != nil
+    var hasWorking = false, hasInput = false, hasAuto = false, hasIdle = false
+
+    for t in allThreads {
+        let recent = (nowMs - t.updated) < 30000  // 30s 内
+
+        // 从 per-thread 文件读 hook 状态
+        let hookState = perThread[t.id]
+        let isHookWorking = hookState == "working" || hookState == "input"
+        let isHookInput = hookState == "input"
+
+        if isHookWorking && recent {
+            hasWorking = true
+        } else if isHookWorking && !recent {
+            // hook 说在工作但 SQLite 没更新 → 可能卡死了，忽略
+        }
+
+        if isHookInput && recent {
+            hasInput = true
+        }
+
+        // SQLite 级别
+        if t.hasEvent && recent { hasInput = true }
+
+        // 自动审批
+        if threadHasAutoReview(t.path) && recent { hasAuto = true }
+
+        // 空闲线程
+        if !recent && !isHookWorking { hasIdle = true }
+    }
+
+    // 如果没有 per-thread 文件，回退到 SQLite 判断
+    if perThread.isEmpty {
+        hasWorking = allThreads.contains(where: { nowMs - $0.updated < 3000 })
+    }
+
+    return (hasWorking, hasInput, hasAuto, hasIdle)
 }
 
 // MARK: - 桌面悬浮
@@ -192,28 +250,21 @@ func sendYellowNotification() {
     UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "codex-yellow", content: c, trigger: nil))
 }
 
-func readStateFile() -> String {
-    (try? String(contentsOfFile: stateFile, encoding: .utf8))?
-        .trimmingCharacters(in: .whitespacesAndNewlines) ?? "idle"
-}
-
 func tick() {
+    let (isWorking, isInput, isAuto, isIdle) = aggregateState()
     var lights = Set<String>()
-    let raw = readStateFile()
-    let isWorking = raw == "working" || raw == "input" || anyWorking()
-    let isInput = anyHasUserEvent()
-    let isAuto = anyHasAutoReview()
-    let isIdle = anyIdle()
 
     if isWorking { lights.insert("working") }
     if isInput   { lights.insert("input") }
     if isAuto    { lights.insert("auto_review") }
-    // 部分完成：有活跃 + 有空闲 → 红灯快闪
-    if isWorking && isIdle { lights.insert("partial") }
-    else if lights.isEmpty && isIdle { lights.insert("idle") }
-    else if lights.isEmpty { lights.insert("idle") }
 
-    log("RAW=\(raw) work=\(isWorking) in=\(isInput) auto=\(isAuto) idle=\(isIdle) -> \(lights.sorted().joined(separator: "+"))")
+    if isWorking && isIdle {
+        lights.insert("partial")
+    } else if lights.isEmpty {
+        lights.insert("idle")
+    }
+
+    log("w=\(isWorking) i=\(isInput) a=\(isAuto) d=\(isIdle) -> \(lights.sorted().joined(separator: "+"))")
 
     let changed = lights != activeLights
     activeLights = lights
