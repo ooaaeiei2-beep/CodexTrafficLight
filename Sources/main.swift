@@ -9,6 +9,12 @@ var yellowStart: Date? = nil
 var yellowNotified = false
 var desktopOverlayRunning = false
 
+// 启动时间戳：启动前就存在的静默线程不算空闲
+let appStartTimeMs = Int64(Date().timeIntervalSince1970 * 1000)
+
+// 黄灯防抖：需要连续 2 次读到的 per-thread 都是 input 才亮
+var lastTickHadInput = false
+
 func log(_ msg: String) {
     let line = ISO8601DateFormatter().string(from: Date()) + " " + msg + "\n"
     if let fh = FileHandle(forWritingAtPath: debugLog) {
@@ -39,7 +45,6 @@ func makeTrafficLightImage(active: Set<String>) -> NSImage {
         let (state, bright) = configs[i], color = bright
         let isActive: Bool
         if state == "idle" {
-            // 红灯：全空闲常亮(k=1)，部分空闲快闪(k=0.2+0.8*|sin|)
             isActive = active.contains("idle") || isPartial
         } else {
             isActive = active.contains(state)
@@ -118,7 +123,7 @@ func threadDisplayName() -> String? {
 
 func openCodex() { NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/Codex.app"), configuration: NSWorkspace.OpenConfiguration()) }
 
-// MARK: - 方案C
+// MARK: - 方案C：Per-thread 文件 + SQLite 兜底
 
 func readPerThreadStates() -> [String: String] {
     var states: [String: String] = [:]
@@ -133,13 +138,13 @@ func readPerThreadStates() -> [String: String] {
     return states
 }
 
-func allActiveThreads() -> [(id: String, updated: Int64, path: String, hasEvent: Bool)] {
-    guard let result = sqliteQuery("SELECT id, updated_at_ms, rollout_path, has_user_event FROM threads WHERE archived=0") else { return [] }
-    var threads: [(String, Int64, String, Bool)] = []
+func allActiveThreads() -> [(id: String, updated: Int64, path: String)] {
+    guard let result = sqliteQuery("SELECT id, updated_at_ms, rollout_path FROM threads WHERE archived=0") else { return [] }
+    var threads: [(String, Int64, String)] = []
     for line in result.components(separatedBy: "\n") {
         let parts = line.components(separatedBy: "|")
-        if parts.count >= 4, let updated = Int64(parts[1]), !parts[2].isEmpty {
-            threads.append((parts[0], updated, parts[2], parts[3] == "1"))
+        if parts.count >= 3, let updated = Int64(parts[1]), !parts[2].isEmpty {
+            threads.append((parts[0], updated, parts[2]))
         }
     }
     return threads
@@ -157,17 +162,28 @@ func threadHasAutoReview(_ path: String) -> Bool {
 func aggregateState() -> (working: Bool, input: Bool, auto: Bool, hasIdle: Bool) {
     let perThread = readPerThreadStates(), allThreads = allActiveThreads()
     let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-    var hasWorking = false, hasInput = false, hasAuto = false, hasIdle = false
+    var hasWorking = false, rawInput = false, hasAuto = false, hasIdle = false
+
     for t in allThreads {
+        // 只关心启动后有活动的线程
+        if t.updated < appStartTimeMs { continue }
+
         let recent = (nowMs - t.updated) < 30000
         let hookState = perThread[t.id]
+
         if (hookState == "working" || hookState == "input") && recent { hasWorking = true }
-        if hookState == "input" && recent { hasInput = true }
-        if t.hasEvent && recent { hasInput = true }
+        if hookState == "input" && recent { rawInput = true }
         if threadHasAutoReview(t.path) && recent { hasAuto = true }
         if !recent && hookState != "working" && hookState != "input" { hasIdle = true }
     }
+
+    // 黄灯防抖：连续两次都是 input 才亮
+    let hasInput = rawInput && lastTickHadInput
+    lastTickHadInput = rawInput
+
+    // 没有 per-thread 文件时回退 SQLite
     if perThread.isEmpty { hasWorking = allThreads.contains(where: { nowMs - $0.updated < 3000 }) }
+
     return (hasWorking, hasInput, hasAuto, hasIdle)
 }
 
@@ -207,7 +223,7 @@ func tick() {
     let (isWorking, isInput, isAuto, isIdle) = aggregateState()
     var lights = Set<String>()
     if isWorking { lights.insert("working") }
-    if isInput && !isAuto { lights.insert("input") }  // 蓝灯亮时不亮黄（自动审批的瞬时闪）
+    if isInput   { lights.insert("input") }
     if isAuto    { lights.insert("auto_review") }
     if isWorking && isIdle { lights.insert("partial") }
     else if lights.isEmpty { lights.insert("idle") }
