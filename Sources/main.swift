@@ -207,7 +207,7 @@ func tick() {
     let (isWorking, isInput, isAuto, isIdle) = aggregateState()
     var lights = Set<String>()
     if isWorking { lights.insert("working") }
-    if isInput   { lights.insert("input") }
+    if isInput && !isAuto { lights.insert("input") }  // 蓝灯亮时不亮黄（自动审批的瞬时闪）
     if isAuto    { lights.insert("auto_review") }
     if isWorking && isIdle { lights.insert("partial") }
     else if lights.isEmpty { lights.insert("idle") }
