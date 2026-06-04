@@ -7,8 +7,7 @@ var lastWorkingStart: Date? = nil
 var lastWorkingDuration: TimeInterval? = nil
 var yellowStart: Date? = nil
 var yellowNotified = false
-// 黄灯防抖：记录 input 状态开始时间
-var inputStateStart: Date? = nil
+
 var desktopOverlayRunning = false
 
 // MARK: - 绘制（四灯，加宽间距）
@@ -180,12 +179,10 @@ func tick() {
     var lights = Set<String>()
     let raw = readStateFile()
 
-    // 黄灯防抖：input 需要持续 1.5 秒才真的亮（避免自动审批时闪过黄灯）
-    if raw == "input" {
-        if inputStateStart == nil { inputStateStart = Date() }
-        if let s = inputStateStart, Date().timeIntervalSince(s) > 2.0 { lights.insert("input") }
-    } else {
-        inputStateStart = nil
+
+    // 黄灯：has_user_event=1 才真亮，否则忽略（自动审批的瞬间闪现）
+    if raw == "input" && sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 LIMIT 1") != nil {
+        lights.insert("input")
     }
 
     if raw == "working" || raw == "input" { lights.insert("working") }
