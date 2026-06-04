@@ -2,12 +2,20 @@ import AppKit
 import UserNotifications
 
 let stateFile = "/tmp/codex_traffic_light_state"
+let debugLog = "/tmp/traffic_light_debug.log"
 var activeLights: Set<String> = ["idle"]
 var lastWorkingStart: Date? = nil
 var lastWorkingDuration: TimeInterval? = nil
 var yellowStart: Date? = nil
 var yellowNotified = false
 var desktopOverlayRunning = false
+
+func log(_ msg: String) {
+    let line = ISO8601DateFormatter().string(from: Date()) + " " + msg + "\n"
+    if let fh = FileHandle(forWritingAtPath: debugLog) {
+        fh.seekToEndOfFile(); fh.write(line.data(using: .utf8)!); try? fh.close()
+    } else { try? line.write(toFile: debugLog, atomically: true, encoding: .utf8) }
+}
 
 func makeTrafficLightImage(active: Set<String>) -> NSImage {
     let w: CGFloat = 78, h: CGFloat = 22
@@ -77,11 +85,11 @@ func sqliteQuery(_ sql: String) -> String? {
         let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let out = out, !out.isEmpty { return out }
-    } catch {}
+    } catch { log("SQLITE FAIL: \(error)") }
     return nil
 }
 
-func threadNameFromIndex() -> String? {
+func threadDisplayName() -> String? {
     guard let threadId = sqliteQuery("SELECT id FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1") else { return nil }
     let indexPath = NSHomeDirectory() + "/.codex/session_index.jsonl"
     guard let content = try? String(contentsOfFile: indexPath, encoding: .utf8) else { return nil }
@@ -93,11 +101,6 @@ func threadNameFromIndex() -> String? {
             }
         }
     }
-    return nil
-}
-
-func threadDisplayName() -> String? {
-    if let name = threadNameFromIndex(), !name.isEmpty { return name }
     if let name = sqliteQuery("SELECT agent_nickname FROM threads WHERE archived=0 AND agent_nickname IS NOT NULL ORDER BY updated_at_ms DESC LIMIT 1"),
        !name.isEmpty { return name }
     return sqliteQuery("SELECT title FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
@@ -108,50 +111,21 @@ func openCodex() {
                                         configuration: NSWorkspace.OpenConfiguration())
 }
 
-// MARK: - 审批检测（通过 rollout function_call 的 prefix_rule 区分）
+func rolloutPath() -> String? { sqliteQuery("SELECT rollout_path FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1") }
 
-func rolloutPath() -> String? {
-    sqliteQuery("SELECT rollout_path FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
-}
-
-// 读取最后一条 function_call 的 arguments JSON
-// 读取当前回合最后一条含 require_escalated 的 function_call 的 arguments
-func escalatedCallArgs() -> String? {
-    guard let path = rolloutPath(),
-          let content = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+func checkEscalation() -> (hasEscalation: Bool, isAuto: Bool) {
+    guard let path = rolloutPath() else { log("CHECK: no rollout path"); return (false, false) }
+    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { log("CHECK: cant read \(path)"); return (false, false) }
+    var hasEsc = false, hasAuto = false
     for line in content.components(separatedBy: "\n").reversed() {
         if line.contains("\"type\":\"task_complete\"") { break }
         if line.contains("\"type\":\"function_call\"") && line.contains("require_escalated") {
-            if let r1 = line.range(of: "\"arguments\":\"") {
-                let start = r1.upperBound
-                var depth = 0, prev: Character = "\0"
-                for (j, ch) in line[start...].enumerated() {
-                    if ch == "\"" && prev != "\\" { break }
-                    if ch == "{" && prev != "\\" { depth += 1 }
-                    if ch == "}" && prev != "\\" { depth -= 1 }
-                    if depth == 0 && ch == "\"" && prev != "\\" {
-                        let endIdx = line.index(start, offsetBy: j)
-                        return String(line[start..<endIdx])
-                            .replacingOccurrences(of: "\\\"", with: "\"")
-                            .replacingOccurrences(of: "\\\\", with: "\\")
-                    }
-                    prev = ch
-                }
-            }
-            break
+            hasEsc = true
+            if line.contains("\"prefix_rule\"") { hasAuto = true }
         }
     }
-    return nil
-}
-
-func hasPrefixRuleInLastCall() -> Bool {
-    guard let args = escalatedCallArgs() else { return false }
-    return args.contains("\"prefix_rule\"")
-}
-
-func hasRequireEscalatedInLastCall() -> Bool {
-    guard let args = escalatedCallArgs() else { return false }
-    return args.contains("require_escalated")
+    log("CHECK: esc=\(hasEsc) auto=\(hasAuto)")
+    return (hasEsc, hasAuto)
 }
 
 let overlayPath = NSHomeDirectory() + "/Documents/学习引导/CodexTrafficLight/DesktopOverlay/DesktopOverlay"
@@ -205,15 +179,11 @@ func readStateFile() -> String {
 func tick() {
     var lights = Set<String>()
     let raw = readStateFile()
-    let isEscalated = hasRequireEscalatedInLastCall()
-    let hasPrefixRule = hasPrefixRuleInLastCall()
-
-    // 黄灯：require_escalated 且没有 prefix_rule → 等人工审批
-    if isEscalated && !hasPrefixRule { lights.insert("input") }
-    // 蓝灯：require_escalated 且有 prefix_rule → 自动批了
-    if isEscalated && hasPrefixRule && raw == "working" { lights.insert("auto_review") }
+    let (hasEsc, isAuto) = checkEscalation()
 
     if raw == "working" || raw == "input" { lights.insert("working") }
+    if hasEsc && isAuto { lights.insert("auto_review") }
+    if hasEsc && !isAuto { lights.insert("input") }
     if lights.isEmpty { lights = ["idle"] }
 
     let changed = lights != activeLights
@@ -239,6 +209,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     @objc func openCodexAction() { openCodex() }
     @objc func toggleOverlayAction() { toggleDesktopOverlay(); updateMenu() }
 }
+
+log("=== START ===")
 
 let app = NSApplication.shared
 let delegate = AppDelegate(); app.delegate = delegate
