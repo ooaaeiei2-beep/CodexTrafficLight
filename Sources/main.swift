@@ -181,9 +181,9 @@ func tick() {
     let raw = readStateFile()
 
     // 黄灯防抖：input 需要持续 1.5 秒才真的亮（避免自动审批时闪过黄灯）
-    if raw == "input" && sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 LIMIT 1") != nil {
+    if raw == "input" {
         if inputStateStart == nil { inputStateStart = Date() }
-        if let s = inputStateStart, Date().timeIntervalSince(s) > 1.5 { lights.insert("input") }
+        if let s = inputStateStart, Date().timeIntervalSince(s) > 2.0 { lights.insert("input") }
     } else {
         inputStateStart = nil
     }
