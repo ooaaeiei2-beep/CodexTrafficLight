@@ -121,7 +121,7 @@ func checkEscalation() -> (hasEscalation: Bool, isAuto: Bool) {
         if line.contains("\"type\":\"task_complete\"") { break }
         if line.contains("\"type\":\"function_call\"") && line.contains("require_escalated") {
             hasEsc = true
-            if line.contains("\"prefix_rule\"") { hasAuto = true }
+            if line.contains("prefix_rule") { hasAuto = true }
         }
     }
     log("CHECK: esc=\(hasEsc) auto=\(hasAuto)")
