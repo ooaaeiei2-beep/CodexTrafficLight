@@ -7,12 +7,14 @@ var lastWorkingStart: Date? = nil
 var lastWorkingDuration: TimeInterval? = nil
 var yellowStart: Date? = nil
 var yellowNotified = false
+// 黄灯防抖：记录 input 状态开始时间
+var inputStateStart: Date? = nil
 var desktopOverlayRunning = false
 
-// MARK: - 绘制（多灯可同时亮）
+// MARK: - 绘制（四灯，加宽间距）
 
 func makeTrafficLightImage(active: Set<String>) -> NSImage {
-    let w: CGFloat = 60, h: CGFloat = 22
+    let w: CGFloat = 78, h: CGFloat = 22
     let img = NSImage(size: NSSize(width: w, height: h))
     img.lockFocus()
     let housing = NSBezierPath(roundedRect: NSRect(x: 1, y: 2, width: w - 2, height: h - 4), xRadius: 5, yRadius: 5)
@@ -20,15 +22,14 @@ func makeTrafficLightImage(active: Set<String>) -> NSImage {
     let inner = NSBezierPath(roundedRect: NSRect(x: 3, y: 4, width: w - 6, height: h - 8), xRadius: 3, yRadius: 3)
     NSColor(white: 0.1, alpha: 1).setFill(); inner.fill()
     let now: CGFloat = CGFloat(Date().timeIntervalSince1970)
-    // 顺序: 绿 黄 蓝 红
     let configs: [(String, NSColor)] = [
         ("working",    NSColor(red: 0.1, green: 0.75, blue: 0.25, alpha: 1)),
         ("input",      NSColor(red: 1.0, green: 0.75, blue: 0.1, alpha: 1)),
         ("auto_review",NSColor(red: 0.1, green: 0.4,  blue: 1.0, alpha: 1)),
         ("idle",       NSColor(red: 0.9, green: 0.15, blue: 0.1, alpha: 1)),
     ]
-    let r: CGFloat = 5.5, spacing: CGFloat = (w - 10) / 4
-    let centers: [CGFloat] = [6 + spacing*0.5, 6 + spacing*1.5, 6 + spacing*2.5, 6 + spacing*3.5]
+    let r: CGFloat = 5.5, spacing: CGFloat = (w - 12) / 4
+    let centers: [CGFloat] = [8 + spacing*0.5, 8 + spacing*1.5, 8 + spacing*2.5, 8 + spacing*3.5]
     for (i, centerX) in centers.enumerated() {
         let (state, bright) = configs[i], isActive = active.contains(state), color = bright
         let cx = centerX, cy: CGFloat = h / 2
@@ -85,9 +86,7 @@ func sqliteQuery(_ sql: String) -> String? {
 }
 
 func threadNameFromIndex() -> String? {
-    guard let threadId = sqliteQuery("SELECT id FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1") else {
-        return nil
-    }
+    guard let threadId = sqliteQuery("SELECT id FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1") else { return nil }
     let indexPath = NSHomeDirectory() + "/.codex/session_index.jsonl"
     guard let content = try? String(contentsOfFile: indexPath, encoding: .utf8) else { return nil }
     for line in content.components(separatedBy: "\n") {
@@ -113,8 +112,6 @@ func openCodex() {
                                         configuration: NSWorkspace.OpenConfiguration())
 }
 
-// MARK: - 自动审批检测
-
 func rolloutPath() -> String? {
     sqliteQuery("SELECT rollout_path FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
 }
@@ -130,8 +127,6 @@ func isAutoReview() -> Bool {
     }
     return false
 }
-
-// MARK: - 桌面悬浮
 
 let overlayPath = NSHomeDirectory() + "/Documents/学习引导/CodexTrafficLight/DesktopOverlay/DesktopOverlay"
 
@@ -152,15 +147,12 @@ func buildMenu() -> NSMenu {
     let t: String
     if activeLights == ["idle"], let d = lastWorkingDuration { t = "空闲 · 上次思考 \(formatDuration(d))" }
     else { t = stateLabel(activeLights) }
-    let h = NSMenuItem(title: t, action: nil, keyEquivalent: ""); h.isEnabled = false; menu.addItem(h)
+    menu.addItem(NSMenuItem(title: t, action: nil, keyEquivalent: ""))
     menu.addItem(NSMenuItem(title: "打开 Codex", action: #selector(AppDelegate.openCodexAction), keyEquivalent: ""))
-    let ot = desktopOverlayRunning ? "✓ 桌面悬浮" : "桌面悬浮"
-    menu.addItem(NSMenuItem(title: ot, action: #selector(AppDelegate.toggleOverlayAction), keyEquivalent: ""))
+    menu.addItem(NSMenuItem(title: desktopOverlayRunning ? "✓ 桌面悬浮" : "桌面悬浮", action: #selector(AppDelegate.toggleOverlayAction), keyEquivalent: ""))
     menu.addItem(.separator())
     if let name = threadDisplayName() {
-        let d = name.count > 28 ? String(name.prefix(28)) + "..." : name
-        let item = NSMenuItem(title: d, action: nil, keyEquivalent: ""); item.isEnabled = false; item.toolTip = name
-        menu.addItem(item)
+        menu.addItem(NSMenuItem(title: name.count > 28 ? String(name.prefix(28))+"..." : name, action: nil, keyEquivalent: ""))
     }
     menu.addItem(.separator())
     menu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -169,12 +161,9 @@ func buildMenu() -> NSMenu {
 
 func updateMenu() {
     item.menu = buildMenu()
-    let label = activeLights == ["idle"] && lastWorkingDuration != nil
+    item.button?.toolTip = activeLights == ["idle"] && lastWorkingDuration != nil
         ? "上次思考 \(formatDuration(lastWorkingDuration!))" : stateLabel(activeLights)
-    item.button?.toolTip = label
 }
-
-// MARK: - 黄灯通知
 
 func sendYellowNotification() {
     let c = UNMutableNotificationContent()
@@ -191,25 +180,23 @@ func tick() {
     var lights = Set<String>()
     let raw = readStateFile()
 
-    // 黄灯
-    if raw == "input",
-       sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 LIMIT 1") != nil {
-        lights.insert("input")
+    // 黄灯防抖：input 需要持续 1.5 秒才真的亮（避免自动审批时闪过黄灯）
+    if raw == "input" && sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 LIMIT 1") != nil {
+        if inputStateStart == nil { inputStateStart = Date() }
+        if let s = inputStateStart, Date().timeIntervalSince(s) > 1.5 { lights.insert("input") }
+    } else {
+        inputStateStart = nil
     }
-    // 绿灯（hooks 说在工作）
+
     if raw == "working" || raw == "input" { lights.insert("working") }
-    // 蓝灯（自动审批）
     if raw == "working" && isAutoReview() { lights.insert("auto_review") }
-    // 兜底红灯
     if lights.isEmpty { lights = ["idle"] }
 
     let changed = lights != activeLights
     activeLights = lights
     if lights.contains("working") || lights.contains("auto_review") {
         if lastWorkingStart == nil { lastWorkingStart = Date() }
-    } else {
-        if let s = lastWorkingStart { lastWorkingDuration = Date().timeIntervalSince(s); lastWorkingStart = nil }
-    }
+    } else { if let s = lastWorkingStart { lastWorkingDuration = Date().timeIntervalSince(s); lastWorkingStart = nil } }
     if lights.contains("input") {
         if yellowStart == nil { yellowStart = Date(); yellowNotified = false }
         else if !yellowNotified, let s = yellowStart, Date().timeIntervalSince(s) > 8 { sendYellowNotification(); yellowNotified = true }
@@ -219,16 +206,12 @@ func tick() {
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
-        if let iconPath = Bundle.main.path(forResource: "CodexTrafficLight", ofType: "icns") {
-            NSApp.applicationIconImage = NSImage(contentsOfFile: iconPath)
-        }
+        if let iconPath = Bundle.main.path(forResource: "CodexTrafficLight", ofType: "icns") { NSApp.applicationIconImage = NSImage(contentsOfFile: iconPath) }
         let c = UNUserNotificationCenter.current(); c.delegate = self
         c.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
-    func userNotificationCenter(_ c: UNUserNotificationCenter, didReceive r: UNNotificationResponse,
-                                withCompletionHandler h: @escaping () -> Void) { openCodex(); h() }
-    func userNotificationCenter(_ c: UNUserNotificationCenter, willPresent n: UNNotification,
-                                withCompletionHandler h: @escaping (UNNotificationPresentationOptions) -> Void) { h([.banner, .sound]) }
+    func userNotificationCenter(_ c: UNUserNotificationCenter, didReceive r: UNNotificationResponse, withCompletionHandler h: @escaping () -> Void) { openCodex(); h() }
+    func userNotificationCenter(_ c: UNUserNotificationCenter, willPresent n: UNNotification, withCompletionHandler h: @escaping (UNNotificationPresentationOptions) -> Void) { h([.banner, .sound]) }
     @objc func openCodexAction() { openCodex() }
     @objc func toggleOverlayAction() { toggleDesktopOverlay(); updateMenu() }
 }
@@ -236,7 +219,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 let app = NSApplication.shared
 let delegate = AppDelegate(); app.delegate = delegate
 let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-item.length = 62
+item.length = 80
 item.button?.image = makeTrafficLightImage(active: ["idle"])
 item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 updateMenu()
