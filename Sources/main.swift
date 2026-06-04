@@ -7,10 +7,7 @@ var lastWorkingStart: Date? = nil
 var lastWorkingDuration: TimeInterval? = nil
 var yellowStart: Date? = nil
 var yellowNotified = false
-
 var desktopOverlayRunning = false
-
-// MARK: - 绘制（四灯，加宽间距）
 
 func makeTrafficLightImage(active: Set<String>) -> NSImage {
     let w: CGFloat = 78, h: CGFloat = 22
@@ -111,20 +108,50 @@ func openCodex() {
                                         configuration: NSWorkspace.OpenConfiguration())
 }
 
+// MARK: - 审批检测（通过 rollout function_call 的 prefix_rule 区分）
+
 func rolloutPath() -> String? {
     sqliteQuery("SELECT rollout_path FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC LIMIT 1")
 }
 
-func isAutoReview() -> Bool {
+// 读取最后一条 function_call 的 arguments JSON
+func lastFunctionCallArgs() -> String? {
     guard let path = rolloutPath(),
-          let content = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
-    let lines = content.components(separatedBy: "\n")
-    for i in stride(from: lines.count - 1, through: 0, by: -1) {
-        let line = lines[i]
-        if line.contains("\"type\":\"function_call\"") { return line.contains("require_escalated") }
+          let content = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    for line in content.components(separatedBy: "\n").reversed() {
+        if line.contains("\"type\":\"function_call\"") {
+            if let r1 = line.range(of: "\"arguments\":\"") {
+                let start = r1.upperBound
+                // 找对应的结束引号（需要处理转义）
+                var depth = 0, prev: Character = "\0"
+                for (j, ch) in line[start...].enumerated() {
+                    if ch == "\"" && prev != "\\" { break }
+                    if ch == "{" && prev != "\\" { depth += 1 }
+                    if ch == "}" && prev != "\\" { depth -= 1 }
+                    if depth == 0 && ch == "\"" && prev != "\\" {
+                        let endIdx = line.index(start, offsetBy: j)
+                        return String(line[start..<endIdx])
+                            .replacingOccurrences(of: "\\\"", with: "\"")
+                            .replacingOccurrences(of: "\\\\", with: "\\")
+                    }
+                    prev = ch
+                }
+            }
+            break
+        }
         if line.contains("\"type\":\"task_complete\"") { break }
     }
-    return false
+    return nil
+}
+
+func hasPrefixRuleInLastCall() -> Bool {
+    guard let args = lastFunctionCallArgs() else { return false }
+    return args.contains("\"prefix_rule\"")
+}
+
+func hasRequireEscalatedInLastCall() -> Bool {
+    guard let args = lastFunctionCallArgs() else { return false }
+    return args.contains("require_escalated")
 }
 
 let overlayPath = NSHomeDirectory() + "/Documents/学习引导/CodexTrafficLight/DesktopOverlay/DesktopOverlay"
@@ -178,15 +205,15 @@ func readStateFile() -> String {
 func tick() {
     var lights = Set<String>()
     let raw = readStateFile()
+    let isEscalated = hasRequireEscalatedInLastCall()
+    let hasPrefixRule = hasPrefixRuleInLastCall()
 
-
-    // 黄灯：has_user_event=1 才真亮，否则忽略（自动审批的瞬间闪现）
-    if raw == "input" && sqliteQuery("SELECT id FROM threads WHERE has_user_event=1 AND archived=0 LIMIT 1") != nil {
-        lights.insert("input")
-    }
+    // 黄灯：require_escalated 且没有 prefix_rule → 等人工审批
+    if isEscalated && !hasPrefixRule { lights.insert("input") }
+    // 蓝灯：require_escalated 且有 prefix_rule → 自动批了
+    if isEscalated && hasPrefixRule && raw == "working" { lights.insert("auto_review") }
 
     if raw == "working" || raw == "input" { lights.insert("working") }
-    if raw == "working" && isAutoReview() { lights.insert("auto_review") }
     if lights.isEmpty { lights = ["idle"] }
 
     let changed = lights != activeLights
