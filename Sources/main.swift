@@ -101,6 +101,13 @@ func isManualApproval(_ path: String) -> Bool {
     return false
 }
 
+func hookFileMtime(_ tid: String) -> Int64 {
+    let path = "/tmp/codex_tl_\(tid)"
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+          let mdate = attrs[.modificationDate] as? Date else { return 0 }
+    return Int64(mdate.timeIntervalSince1970 * 1000)
+}
+
 func computeLightState() {
     let perThread = readPerThreadStates()
     let allThreads = allActiveThreads()
@@ -110,12 +117,12 @@ func computeLightState() {
     var hasManualApproval = false
 
     for t in allThreads {
-        if t.updated < appStartTimeMs && perThread[t.id] == nil { continue }
-        let recent = (nowMs - t.updated) < 30000
         let hookState = perThread[t.id]
 
-        // Working: hook says working or input, and recent
-        if (hookState == "working" || hookState == "input") && recent { hasWorking = true }
+        // Working: hook says working or input, use hook file mtime for recency
+        let hookMtime = hookFileMtime(t.id)
+        let recentHook = hookMtime > 0 && (nowMs - hookMtime) < 30000
+        if (hookState == "working" || hookState == "input") && recentHook { hasWorking = true }
 
         // Manual approval check
         if hasApprovalFlag(t.id), let age = approvalFlagAge(t.id), age < 60 {
