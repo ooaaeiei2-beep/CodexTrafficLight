@@ -4,7 +4,7 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE_DIR="$(dirname "$PROJECT_DIR")"
 APP_NAME="CodexTrafficLight"
-VERSION="1.0"
+VERSION="1.0.1"
 BUNDLE="$WORKSPACE_DIR/${APP_NAME}.app"
 SOURCES="$PROJECT_DIR/Sources/main.swift"
 TMPDIR="/private/tmp/swift-cache"
